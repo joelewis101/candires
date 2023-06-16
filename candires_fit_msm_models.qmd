@@ -22,6 +22,7 @@ library(here)
 library(msm)
 library(patchwork)
 library(viridis)
+library(janitor)
 
 ## HELPER FUNCTIONS TO MAKE MSM DATAFRAMES ---------------------------------
 
