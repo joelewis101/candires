@@ -8,7 +8,7 @@ Details on quarto are available [here](https://quarto.org/) - it's similar to
 Rmarkdown and can be used to render the code and analysis and plain text to a 
 document. It's supported by Rstudio or can be run from the command line.
 
-The code assumes that the data is in a folder `data_raw` - filenames should be 
-self-explanatory from the code.
+The code assumes that the data is in a folder `data-raw/` - filenames should 
+be self-explanatory from the code.
 
  
