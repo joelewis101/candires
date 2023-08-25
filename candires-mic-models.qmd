@@ -1,0 +1,814 @@
+---
+title: Candires MIC models
+author: "Joe Lewis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+ pdf: 
+  mathspec: true
+  toc: true
+  number-sections: true
+  
+execute:
+  echo: false
+  warning: false
+---
+
+```{r setup} 
+#| echo: false
+#| warning: false
+#| message: false
+#| include: false
+
+library(tidyverse)
+library(cmdstanr)
+library(bayesplot)
+library(patchwork)
+library(here)
+library(pheatmap)
+library(FactoMineR)
+library(factoextra)
+
+# data loading script
+
+source(here("load_mic_data.R"))
+
+df <- read_csv(here("data-raw/candires_long_df_mic_28june.csv"))
+
+# this will split off mic measurements and drugs in to separate data frames
+
+
+```
+
+# Outline of document
+
+This document outlines a modelling approach to the MIC data from the candires
+dataset. 
+
+# Describing the available data
+
+## Participants, *Candida* species and antifungal exposure
+
+There looks to be `r df_mics |> select(psn, swb_date) |> unique() |> nrow()` samples collected from
+`r df_mics |> select(psn) |> unique() |> nrow()` participants. Of these, 
+`r df_drug |> select(psn) |> unique() |> nrow()` have any antifungal exposure.
+
+```{r} 
+#| fig.cap: "Describing the dataset"
+#| fig.height: 7
+#| fig.width: 5
+#| fig.pos: "H"
+
+# number of samples per participant
+
+df_mics |>
+  select(psn, swb_date) |>
+  unique() |>
+  count(psn) |>
+  ggplot(aes(n)) +
+  geom_bar() +
+  theme_bw() +
+  scale_x_continuous(breaks = 0:10) + 
+  labs(subtitle = "Samples per participant") -> a
+
+df_mics |>
+  select(psn, swb_date, species) |>
+  unique() |>
+  ggplot(aes(fct_infreq(species))) +
+  geom_bar() +
+  coord_flip() +
+  theme_bw() +
+  labs(subtitle = "Species distribution", x = "") -> b
+
+df_drug |>
+  select(psn, antifung_class) |>
+  unique() |>
+  ggplot(aes(fct_infreq(antifung_class))) +
+  geom_bar() +
+  coord_flip() +
+  theme_bw() +
+  labs(subtitle = "Participants with antifungal exposure", x = "") -> c
+
+a / c / b
+
+```
+## Distribution of MICs
+
+Look at plots of log(MIC) - use this as we will model log(MIC) later on
+
+```{r} 
+#| fig.cap: "Azole log MIC distribution for top 5 most prevalent species, stratified by azole exposure (defined as any recorded azole exposure prior to/same day as sample collection"
+#| fig.height: 10
+#| fig.width: 9
+#| fig.pos: "H"
+
+df_mics |>
+  left_join(
+    df_drug |>
+      select(-date_enrol) |>
+      filter(antifung_class == "Azole"),
+    join_by(psn, closest(swb_date >= date_antifung_start))
+  ) |>
+  mutate(
+    days_since_azole_expoure =
+      case_when(
+        is.na(date_antifung_start) ~ NA_integer_,
+        date_antifung_end >= swb_date ~ 0,
+        date_antifung_end < swb_date ~ as.numeric(
+          difftime(swb_date, date_antifung_end, units = "days")
+        ),
+        TRUE ~ -999
+      )
+  ) |>
+  mutate(
+    azole_exposure =
+      if_else(is.na(days_since_azole_expoure), "unexposed", "exposed")
+  ) |>
+  filter(species %in% unique(fct_infreq(species))[1:5]) |>
+  filter(
+    # species == "albicans",
+    grepl("A|azole", drug)
+  ) |>
+  # mutate(mic = factor(mic, levels = sort(unique(mic)))) |> 
+  ggplot(aes(log(mic), fill = azole_exposure)) +
+  geom_bar(position = position_dodge(preserve = "single")) +
+  facet_wrap(species ~ drug, scales = "free", ncol = 4) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+```{r} 
+#| fig.cap: "Echinocandin log MIC distribution for top 5 most prevalent species, stratified by echinocandin exposure (defined as any recorded echinocandin exposure prior to/same day as sample collection"
+#| fig.height: 10
+#| fig.width: 9
+#| fig.pos: "H"
+
+
+
+df_mics |>
+  left_join(
+    df_drug |>
+      select(-date_enrol) |>
+      filter(antifung_class == "Echinocandin"),
+    join_by(psn, closest(swb_date >= date_antifung_start))
+  ) |>
+  mutate(
+    days_since_echiniocandin_expoure =
+      case_when(
+        is.na(date_antifung_start) ~ NA_integer_,
+        date_antifung_end >= swb_date ~ 0,
+        date_antifung_end < swb_date ~ as.numeric(
+          difftime(swb_date, date_antifung_end, units = "days")
+        ),
+        TRUE ~ -999
+      )
+  ) |>
+  mutate(
+    echinocandin_exposure =
+      if_else(is.na(days_since_echiniocandin_expoure), "unexposed", "exposed")
+  ) |>
+  filter(species %in% unique(fct_infreq(species))[1:5]) |>
+  filter(
+    grepl("fungin", drug)
+  ) |>
+  # mutate(mic = factor(mic, levels = sort(unique(mic)))) |>
+  ggplot(aes(log(mic), fill = echinocandin_exposure)) +
+  geom_bar(position = position_dodge(preserve = "single")) +
+  facet_wrap(species ~ drug, scales = "free", ncol = 3) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+ 
+```{r} 
+#| fig.cap: "Amphotericin log MIC distribution for top 5 most prevalent species, stratified by amphotericin exposure (defined as any recorded amphotericin exposure prior to/same day as sample collection"
+#| fig.height: 5
+#| fig.width: 9
+#| fig.pos: "H"
+
+df_mics |>
+  left_join(
+    df_drug |>
+      select(-date_enrol) |>
+      filter(antifung_class == "Amphotericin B"),
+    join_by(psn, closest(swb_date >= date_antifung_start))
+  ) |>
+  mutate(
+    days_since_drug_expoure =
+      case_when(
+        is.na(date_antifung_start) ~ NA_integer_,
+        date_antifung_end >= swb_date ~ 0,
+        date_antifung_end < swb_date ~ as.numeric(
+          difftime(swb_date, date_antifung_end, units = "days")
+        ),
+        TRUE ~ -999
+      )
+  ) |>
+  mutate(
+    drug_exposure =
+      if_else(is.na(days_since_drug_expoure), "unexposed", "exposed")
+  ) |>
+  filter(species %in% unique(fct_infreq(species))[1:5]) |>
+  filter(
+    # species == "albicans",
+    grepl("ampho", drug)
+  ) |>
+  # mutate(mic = factor(mic, levels = sort(unique(mic)))) |> 
+  ggplot(aes(log(mic), fill = drug_exposure)) +
+  geom_bar(position = position_dodge(preserve = "single")) +
+  facet_wrap(species ~ drug, scales = "free", ncol = 4) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+## Correlation of MICs of agents of the same class
+
+Plot Pearson correlation coefficients and PCA of log(MIC) values to ask the
+question: to what extent are the log (MIC) values similar within drug class?
+They seem to be very correlated, meaning we can just pick an azole and an
+echinocandin to use as an outcome variable.
+
+```{r} 
+#| fig.cap: "Hierarchical clustered heatmap of matrix of Pearson correlation coefficients for log(MIC) values, showing that MICs within antifungal class are strongly correlated"
+#| fig.height: 4
+#| fig.width: 5
+#| fig.pos: "H"
+
+
+df_mics |>
+  select(-date_enrol) |>
+  group_by(psn,swb_date, species, drug) |>
+  slice(1) |>
+  ungroup() |>
+  mutate(mic = log(mic)) |>
+  pivot_wider(id_cols = c(psn, swb_date, species),
+    names_from = drug,
+    values_from = mic) -> df
+
+pheatmap(
+  cor(select(df, -c(psn, swb_date, species)), use = "pair")
+  ) 
+
+```
+
+```{r} 
+#| fig.cap: "PCA of log(MIC) values showing correlation of MIC values of antifungal class and clustering of species in PCA space"
+#| fig.height: 5
+#| fig.width: 10
+#| fig.pos: "H"
+
+PCA(select(df, -c(psn, swb_date)), quali.sup = 1, graph = FALSE) -> p
+
+fviz_pca_var(p, repel = TRUE,axes = c(1,2)) -> p_a
+
+fviz_pca_ind(p, label = "none", habillage = 1, addEllipses = TRUE) -> p_b
+
+
+p_a + p_b + plot_layout(ncol = 2)
+
+```
+
+# Modelling log(MIC)
+
+## Defining and fitting the model
+
+The overall approach is to construct mixed effects models that allow pooling if
+information across Candida species and to account for repeated sampling of
+individuals. Assume that log(MIC) is normally distributed (i.e
+that MIC values are lognormally distributed, with a random intercept by species
+and for each individual participant that modifies the mean of the log(MIC)
+normal distribution. The effect of drug exposure is allowed to
+vary by species (i.e. a random slope) and acts to modify the mean of the log(MIC
+distribution) with an effect that exponentially decays once drug exposure
+finishes. Drug and species effect can be correlated (more resistant species can
+have a greater or lesser effect of drug).
+
+Formally, assume that there are $y_{i}$ log(MIC) observations where $i = 1, 2
+... n$ indexes the observation, collected from $K$ participants, and $J$ Candida
+species found.
+
+The log(MIC) values are assumed normally distributed:
+
+$$y_{i} \sim Normal(\mu_{i},\sigma)$$
+
+Where
+
+$$\mu_{i} = \beta_{species}^{j} + \beta(t)_{drug}^{j} + \gamma_{participant}^{k}$$
+
+For species $j$ and participant $k$ and the $\beta^{j}$ and $\gamma^{k}$ terms
+encode the effects of species, drug and participant on the mean of the MIC
+distribution for a given participant and species, and are given by:
+
+$$ \gamma_{participant}^{k} \sim Normal(0,\sigma_{participant})$$
+$$ \beta(t)_{drug}^{j} = \beta_{drug}^{j}f(t) $$
+
+$f(t)$ takes the value 1 during antifungal exposure, 0 if a participant has had
+no antifungal exposure, and decays following cessation of antifungal exposure,
+given by $e^{-\frac{t}{\tau}}$; the speed of decay is therefore encoded by
+$\tau$
+
+Finally, species and drug effect are correlated by being drawn for a
+multivariate normal distibution with covariance matrix $\boldsymbol{\Sigma}$:
+
+$$ 
+\begin{bmatrix} 
+\beta_{species}^{j} \\ 
+\beta_{drug}^{j} 
+\end{bmatrix} 
+\sim MVNorm( \begin{bmatrix} 0 \\ 0 \end{bmatrix} , \boldsymbol{\Sigma})
+$$
+
+Weakly informative priors are placed on all parameters: Student's t distribution
+with 3 degrees of freedom, mean 0 and SD 6 for all parameters except $\tau$, for
+which the SD was set at 100 days. The models are coded and fit in Stan, using
+cmdStanR package, for 1000 iterations and 4 chains.
+
+Fluconazole, micafungin and amphoteracin B MICs were chosen as the outcome
+variables, and the effect of various antifungal exposures on these MICs explored
+- plots are below
+
+## Results
+
+```{r} 
+
+# first define some helper functions
+
+
+# helper function to get the data in the right format
+
+prepare_data_in_stan_model_format <-
+  function(df_mics = df_mics,
+           df_drug = df_drug,
+           exposure_drug_class, outcome_drug,
+           output = "list",
+           scale_outcome = FALSE) { 
+  
+  df_out <-
+    df_mics |>
+      left_join(
+        df_drug |>
+          select(-date_enrol) |>
+          filter(antifung_class == {{ exposure_drug_class }}),
+        join_by(psn, closest(swb_date >= date_antifung_start))
+      ) |>
+      mutate(
+        days_since_drug_exposure =
+          case_when(
+            is.na(date_antifung_start) ~ NA_integer_,
+            date_antifung_end >= swb_date ~ 0,
+            date_antifung_end < swb_date ~ as.numeric(
+              difftime(swb_date, date_antifung_end, units = "days")
+            ),
+            TRUE ~ -999
+          )
+      ) |>       
+      filter(drug == {{ outcome_drug }}) 
+
+  species_lookup <-
+    tibble(
+      species_id = seq_len(length(unique(df_out$species))),
+      species = unique(fct_infreq(df_out$species))
+    ) 
+
+  data_list_out <- list(
+    n = nrow(df_out),
+    n_participants = length(unique(df_out$psn)),
+    n_species = length(unique(df_out$species)),
+    pid =
+      left_join(
+        df_out |>
+          select(psn),
+        tibble(
+          psn = unique(df_out$psn),
+          id = seq_along(psn)
+        )
+      ) |>
+        pull(id),
+    species_id =
+      left_join(
+        df_out |>
+          select(species),
+        species_lookup
+      ) |>
+        pull(species_id),
+    y = log(df_out$mic),
+    t_e = if_else(is.na(df_out$days_since_drug_exposure), -1,
+      df_out$days_since_drug_exposure
+    )
+  )
+
+  if (scale_outcome == TRUE) {
+    data_list_out$y <- scale(data_list_out$y)[,1]
+  }
+
+  if (output == "list") {
+      return(data_list_out)
+    } else if (output == "df") {
+    return(df_out) 
+  } else if (output == "species lookup") {
+      return(species_lookup)
+  } else {
+    stop("unknown output type in prepare_data_in_stan_model_format()")
+  }
+
+}
+
+# helper function to plot the outputs
+
+plot_model_output <- function(mcmc_draws, exposure_drug_class, outcome_drug) {
+    
+  species_lookup <-
+        prepare_data_in_stan_model_format(
+          df_mics = df_mics,
+          df_drug = df_drug,
+          exposure_drug_class = exposure_drug_class,
+          outcome_drug = outcome_drug,
+          output = "species lookup"
+        ) 
+
+  params <-
+    mcmc_intervals_data(mcmc_draws,
+      prob_outer = 0.95
+    )
+
+  plot_a <-
+    params |>
+    filter(grepl("beta.*,2]", parameter)) |>
+    left_join(
+      species_lookup |>
+        mutate(parameter = paste0("beta[", species_id, ",2]")) |>
+        select(species, parameter)
+    ) |>
+    mutate(species = gsub("\\(.*\\)","", species)) |>
+    ggplot(aes(fct_reorder(species, m, .desc = TRUE), m, ymin = ll, ymax = hh)) +
+    geom_point() +
+    geom_errorbar(width = 0) +
+    coord_flip() +
+    labs(
+      title = "Drug effect",
+      y = "Change in mean log(MIC)\nduring drug exposure", x = ""
+    )
+
+  plot_b <-
+    params |>
+    filter(grepl("beta.*,1]", parameter)) |>
+    left_join(
+      species_lookup |>
+        mutate(parameter = paste0("beta[", species_id, ",1]")) |>
+        select(species, parameter)
+    ) |>
+    mutate(species = gsub("\\(.*\\)","", species)) |>
+    ggplot(aes(fct_reorder(species, m, .desc = TRUE), m, ymin = ll, ymax = hh)) +
+    geom_point() +
+    geom_errorbar(width = 0) +
+    coord_flip() +
+    labs(
+      title = "Species effect",
+      y = "Baseline (intercept) mean log(MIC)\n for species", x = ""
+    )
+
+  plot_c <-
+    params |>
+    filter(grepl("gamma\\[", parameter)) |>
+    ggplot(aes(fct_reorder(parameter, m, .desc = TRUE), m, ymin = ll, ymax = hh)) +
+    geom_point() +
+    geom_errorbar(width = 0) +
+    coord_flip() +
+    labs(title = "Individual effect", y = "Individual effect on mean log(MIC)", x = "pid")
+
+  plot_d <-
+    params |>
+    filter(grepl("sigma|Omega\\[2,1", parameter)) |>
+    mutate(
+      parameter =
+        case_when(
+          parameter == "sigma" ~ "SD of log(MIC)\ndistribution",
+          parameter == "gamma_sigma" ~ "SD of within-individual\neffect",
+          parameter == "beta_sigma[1]" ~ "SD of species\neffect",
+          parameter == "beta_sigma[2]" ~ "SD of drug\neffect",
+          parameter == "Omega[2,1]" ~ "Correlation coefficient of\nspecies and drug effects",
+          TRUE ~ parameter
+        )
+    ) |>
+    ggplot(aes(fct_reorder(parameter, m, .desc = TRUE), m, ymin = ll, ymax = hh)) +
+    geom_point() +
+    geom_errorbar(width = 0) +
+    coord_flip() +
+    labs(title = "Other model parameters", y = "Value", x = "")
+
+  plot_e <-
+    params |>
+    filter(grepl("tau", parameter)) |>
+    mutate(across(where(is.numeric), \(x) x * log(2))) |>
+    mutate(
+      parameter =
+        case_when(
+          parameter == "tau" ~ "Half life (days) of\n antibiotic effect",
+          TRUE ~ parameter
+        )
+    ) |>
+    ggplot(aes(fct_reorder(parameter, m), m, ymin = ll, ymax = hh)) +
+    geom_point() +
+    geom_errorbar(width = 0) +
+    coord_flip() +
+    labs(title = "Other model parameters", y = "Value", x = "")
+
+  (plot_a + plot_b) / (plot_c + (plot_d / plot_e)) + 
+    plot_annotation(title = paste0(exposure_drug_class,
+      " exposure and effect on ",
+      outcome_drug,
+      " log(MIC)"))
+}
+
+# compile model if needed
+
+model <- cmdstan_model(here("mic_model_final.stan"))
+
+```
+
+
+```{r} 
+#| echo: false
+#| warning: false
+#| message: false
+#| include: false
+
+fit_azole_fluconazole <-
+  model$sample(
+    data =
+      prepare_data_in_stan_model_format(
+        df_mics = df_mics,
+        df_drug = df_drug,
+        exposure_drug_class = "Azole",
+        outcome_drug = "fluconazole",
+        output = "list",
+    scale_outcome = TRUE
+      ),
+    chains = 4,
+    parallel_chains = 4
+  )
+
+```
+
+```{r} 
+#| fig.cap: "Outputs of model considering effect of azole exposure on fluconazole MIC"
+#| fig.height: 9.5
+#| fig.width: 8
+#| echo: false
+#| warning: false
+#| message: false
+
+draws_azole_fluconazole <- fit_azole_fluconazole$draws()
+
+plot_model_output(draws_azole_fluconazole, "Azole","fluconazole")
+
+```
+
+
+
+```{r} 
+#| echo: false
+#| warning: false
+#| message: false
+#| include: false
+
+fit_echinocandin_fluconazole <-
+  model$sample(
+    data =
+      prepare_data_in_stan_model_format(
+        df_mics = df_mics,
+        df_drug = df_drug,
+        exposure_drug_class = "Echinocandin",
+        outcome_drug = "fluconazole",
+        output = "list",
+        scale_outcome = FALSE
+      ),
+    chains = 4,
+    parallel_chains = 4,
+    adapt_delta = 0.9999,
+    step_size = 0.001,
+    max_treedepth = 20
+  )
+
+```
+
+```{r}
+#| fig.cap: "Outputs of model considering effect of echinocandin exposure on fluconazole MIC"
+#| fig.height: 9.5
+#| fig.width: 8
+#| echo: false
+#| warning: false
+#| message: false
+
+draws_echinocandin_fluconazole <- fit_echinocandin_fluconazole$draws()
+
+plot_model_output(draws_echinocandin_fluconazole, "Echinocandin",
+  "fluconazole")
+
+```
+
+
+
+```{r} 
+#| echo: false
+#| warning: false
+#| message: false
+#| include: false
+
+
+fit_echinocandin_micafungin <-
+  model$sample(
+    data =
+      prepare_data_in_stan_model_format(
+        df_mics = df_mics,
+        df_drug = df_drug,
+        exposure_drug_class = "Echinocandin",
+        outcome_drug = "micafungin",
+        output = "list",
+        scale_outcome = FALSE
+      ),
+    chains = 4,
+    parallel_chains = 4,
+    adapt_delta = 0.9999,
+    step_size = 0.001,
+    max_treedepth = 20
+  )
+
+```
+
+```{r}
+#| fig.cap: "Outputs of model considering effect of echinocandin exposure on micafungin MIC"
+#| fig.height: 9.5
+#| fig.width: 8
+#| echo: false
+#| warning: false
+#| message: false
+
+draws_echinocandin_micafungin <- fit_echinocandin_micafungin$draws()
+
+plot_model_output(draws_echinocandin_micafungin, "Echinocandin",
+  "micafungin")
+
+
+```
+
+
+```{r} 
+#| echo: false
+#| warning: false
+#| message: false
+#| include: false
+
+
+fit_azole_micafungin <-
+  model$sample(
+    data =
+      prepare_data_in_stan_model_format(
+        df_mics = df_mics,
+        df_drug = df_drug,
+        exposure_drug_class = "Azole",
+        outcome_drug = "micafungin",
+        output = "list",
+        scale_outcome = FALSE
+      ),
+    chains = 4,
+    parallel_chains = 4,
+    adapt_delta = 0.9999,
+    step_size = 0.001,
+    max_treedepth = 20
+  )
+
+```
+
+```{r}
+#| fig.cap: "Outputs of model considering effect of azole exposure on micafungin MIC"
+#| fig.height: 9.5
+#| fig.width: 8
+#| echo: false
+#| warning: false
+#| message: false
+
+draws_azole_micafungin <- fit_azole_micafungin$draws()
+
+plot_model_output(draws_azole_micafungin, "Azole",
+  "micafungin")
+
+```
+
+
+```{r} 
+#| echo: false
+#| warning: false
+#| message: false
+#| include: false
+
+
+fit_ampho_b_ampho_b <-
+  model$sample(
+    data =
+      prepare_data_in_stan_model_format(
+        df_mics = df_mics,
+        df_drug = df_drug,
+        exposure_drug_class = "Amphotericin B",
+        outcome_drug = "amphotericin_b",
+        output = "list",
+        scale_outcome = FALSE
+      ),
+    chains = 4,
+    parallel_chains = 4,
+    adapt_delta = 0.9999,
+    step_size = 0.001,
+    max_treedepth = 20
+  )
+
+```
+
+```{r}
+#| fig.cap: "Outputs of model considering effect of ampho B exposure on ampho B MIC"
+#| fig.height: 9.5
+#| fig.width: 8
+#| echo: false
+#| warning: false
+#| message: false
+
+draws_ampho_b_ampho_b <- fit_ampho_b_ampho_b$draws()
+
+plot_model_output(draws_ampho_b_ampho_b, "Amphotericin B",
+  "amphotericin_b")
+
+```
+
+
+
+```{r} 
+#| echo: false
+#| warning: false
+#| message: false
+#| include: false
+
+
+fit_nystatin_ampho_b <-
+  model$sample(
+    data =
+      prepare_data_in_stan_model_format(
+        df_mics = df_mics,
+        df_drug = df_drug,
+        exposure_drug_class = "Nystatin",
+        outcome_drug = "amphotericin_b",
+        output = "list",
+        scale_outcome = FALSE
+      ),
+    chains = 4,
+    parallel_chains = 4,
+    adapt_delta = 0.9999,
+    step_size = 0.001,
+    max_treedepth = 20
+  )
+
+```
+
+```{r}
+#| fig.cap: "Outputs of model considering effect of nystatin exposure on Ampho B MIC"
+#| fig.height: 9.5
+#| fig.width: 8
+#| echo: false
+#| warning: false
+#| message: false
+
+draws_nystatin_ampho_b <- fit_nystatin_ampho_b$draws()
+
+plot_model_output(draws_nystatin_ampho_b, "Nystatin",
+  "amphotericin_b")
+
+```
+
+\newpage
+
+
+# Conclusions
+
+* There do seem to be some associations between drug exposure and changes in
+MIC, though there is lots of uncertainty especially in the rarer species
+(because for them, there is not much data)
+* The effects, overall, of antifungal exposure on MIC are generally not large
+compared to species effects - what species you are colonised with is probably
+the biggest determinant of MIC
+* There is a *lot* of uncertainty in the duration of an effect of antifungal
+exposure (the $\tau$ parameter) - this is I think because there is not lots of
+evidence for a strong effect of antifungal on MICs anyway.
+* All of that said
+  + *C. lusitaniae* seems to have the strongest association between azole
+exposure and increased fluconazole MIC. Is this biologically plausible?
+  + *C. glabrata* seems to have a weaker, but opposite association - the isolates
+  in azole-exposed people are *more* azole sensitive. Hard to think why this
+would be, though it may reflect confounding of course and certainly not
+necessarily causal - needs some thought?
+  + Some evidence for an association between echinocandin exposure and increased
+micafungin MICs for *C. albicans*
+  + No evdidence for an association between azole exposure and change in
+micafungin MICs or echinocandin exposure and change in azole MICs - which may
+give some support to the modelling strategy.
+  + No evidence of effect of ampho B or nystatin exposure on ampho B MICs.
+* The individual effect is sometimes large - some people are colonised with
+nasty resistant bugs that goes beyond species or drug effect.
+
+
