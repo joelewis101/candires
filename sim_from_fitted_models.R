@@ -26,7 +26,7 @@ q <- function(q01, q10, b01, b10) {
 
 #given an inital probability of being in state 1 initial_p1,
 #q matrix q and time t, output the probabiity of being in state 1 at time t
-pr_state0 <- function(initial_p1, q, t) {
+pr_state1 <- function(initial_p1, q, t) {
   f <- matrix(
     data = c(1 - initial_p1, initial_p1),
     ncol = 2, nrow = 1, byrow = TRUE
@@ -34,12 +34,44 @@ pr_state0 <- function(initial_p1, q, t) {
   return((f %*% expm(q * t))[1, 2])
 }
 
+
+# calculate stationary values - start at this probability
+
+initial_p1s <- 
+bind_rows(
+  lapply(
+    fitted_mods,
+    function(x) {
+      bind_cols(
+        species = x$species,
+        drug = x$drug,
+        bayesplot::mcmc_intervals_data(x$model_fit$draws(),
+          prob_outer = 0.95
+        )
+      )
+    }
+  )
+) |>
+  filter(grepl("q", parameter)) |>
+  select(species, drug, parameter, m) |>
+  pivot_wider(
+    id_cols = c(species, drug),
+    names_from = parameter,
+    values_from = m
+  ) |>
+  janitor::clean_names() |>
+  rowwise() |>
+  mutate(p1_initial = pr_state1(
+    0.5,
+    q(q_1, q_2, 0, 0),
+    100
+  )) 
+
 # iterate over fitted models
 
 
-t_steps <- 1:50
+t_steps <- 0:50
 abx_days <- 10
-p1_initial <- 0.5
 
 sims_list_full_posterior <- list()
 sims_list_summary <- list()
@@ -49,6 +81,20 @@ for (i in seq_len(length(fitted_mods))) {
   print(
     paste0("Model ", i, " of ", length(fitted_mods))
   )
+
+
+  p1_initial <-
+    initial_p1s |>
+    filter(
+      species == fitted_mods[[i]]$species,
+      drug == fitted_mods[[i]]$drug
+    ) |>
+    pull(p1_initial)
+
+  if (length(p1_initial) > 1) {
+    stop("More than one initial p1?")
+  }
+
 
   sim_df <-
     expand_grid(
@@ -64,7 +110,7 @@ for (i in seq_len(length(fitted_mods))) {
     mutate(draw = rep(seq_len(nrow(d)), length(t_steps))) |>
     janitor::clean_names() |>
     rowwise() |>
-    mutate(pr_0 = pr_state0(
+    mutate(pr_1 = pr_state1(
       initial_p1 = p1_initial,
       q = q(q_1, q_2, beta_01_1 * abx, beta_10_1 * abx),
       t = t
@@ -80,9 +126,9 @@ for (i in seq_len(length(fitted_mods))) {
     ungroup() |>
     group_by(species, drug, t) |>
     summarise(
-      pr_1 = median(pr_0),
-      lci = quantile(pr_0, 0.025),
-      uci = quantile(pr_0, 0.975),
+      pr_1_med = median(pr_1),
+      lci = quantile(pr_1, 0.025),
+      uci = quantile(pr_1, 0.975),
       .groups = "keep"
     )
 
