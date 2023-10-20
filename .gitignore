@@ -1,4 +1,15 @@
 data-raw/
+data/
+*_files/
 .DS_store
+.Rhistory
 *.pdf
+*.html
 scratch-files/
+hmm_bin_2s
+mic_model_v2
+archive/hmm
+archive/hmm2
+archive/hmm3
+archive/hmm_final
+

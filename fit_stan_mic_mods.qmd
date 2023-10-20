@@ -1,0 +1,216 @@
+---
+title: Fit candires mic models in stan
+author: "Joe Lewis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: html
+execute:
+  echo: false
+  warning: false
+---
+
+# Intoduction
+
+Fit mixed effect models for candida mic for the top four
+species with an effect of antifungal exposure. Plot model diagnostics and
+parameter values, and save the fitted models to `data/fitted_mic_models.rds`
+
+```{r setup}
+
+library(tidyverse)
+library(msm)
+library(here)
+library(ivs)
+library(bayesplot)
+library(patchwork)
+
+source(here("load_mic_data.R"))
+source(here("modelling_helper_functions.R"))
+
+library(cmdstanr)
+ 
+mic_mod <- cmdstan_model(here("mic_model_v2.stan"))
+
+
+```
+
+```{r fit_mods}
+
+species = c("albicans", "glabrata", "dubliniensis", "parapsilosis")
+drug = c("Azole", "Echinocandin")
+
+list_out <- list()
+i <- 1
+
+for (current_species in species) {
+  for (current_drug in drug) {
+    # print(i)
+if (current_drug == "Azole") {
+      current_mic_drug <- "fluconazole" 
+    } else {
+      current_mic_drug <- "anidulafungin"
+    }
+  sublist_out <- list()
+  sublist_out$species <- current_species
+    sublist_out$drug <- current_drug
+    list_out[[i]] <- sublist_out
+# print(current_species)
+# print(current_drug)
+# print(current_mic_drug)
+
+generate_mic_model_data(
+  df_mics,
+  df_drug,
+  spec = current_species,
+  exposure_drug_class = current_drug,
+  mic_drug = current_mic_drug,
+  code_antifungal_exposure_as = "zero_for_onngoing_exposure"
+) |>
+  make_mic_model_list_for_stan(scale = TRUE) -> data_list
+
+
+
+# if (current_species == "dubliniensis" &
+#   current_drug == "Azole") {
+#       adapt_delta = 0.99
+#       step_size = 0.001 
+#     } else {
+#       adapt_delta = 0.8
+#       step_size = 1
+#     }
+
+adapt_delta = 0.8
+step_size = 1
+
+sublist_out$model_fit <- mic_mod$sample(
+  data = data_list,
+  chains = 4,
+  iter_warmup = 1000,
+  iter_sampling = 1000,
+  refresh = 500,
+  adapt_delta = adapt_delta,
+  step_size = step_size,
+  # max_treedepth = 15,
+  parallel_chains = 4,
+  output_dir = here("data")
+)
+
+list_out[[i]] <- sublist_out 
+i <- i + 1
+  }
+}
+
+write_rds(list_out, 
+  here("data/fitted_stan_mic_models.rda"),
+  compress = "gz")
+
+
+
+```
+
+# Stan sample diagnostics
+
+```{r sampler-warnings}
+
+
+bind_rows( 
+  lapply(
+    list_out, 
+    function(x) bind_cols( 
+      species = x$species, 
+      drug = x$drug,
+      (x$model_fit$diagnostic_summary())
+    )
+  ) 
+) |>
+  pivot_longer(-c(species, drug)) |>
+  ggplot(aes(species, value, fill = drug)) +
+  geom_col(position = "dodge") +
+  coord_flip() + 
+  facet_grid(~ name, scales = "free_x")
+
+
+
+```
+
+# Traceplots, ESS, R-hat
+
+```{r model-diagnostics}
+
+bind_rows( 
+  lapply(
+    list_out, 
+    function(x) bind_cols( 
+      species = x$species, 
+      drug = x$drug,
+      summary(x$model_fit$draws ())
+    )
+  ) 
+) |> select(species, 
+      drug, 
+      variable, 
+      rhat, 
+      ess_bulk) |>
+  filter(grepl("mu0|sigma|tau|beta", variable)) |>
+  pivot_longer(-c(species, drug, variable)) |>
+  ggplot(aes(value, variable, fill = drug)) +
+  geom_col(position = "dodge") +
+  facet_grid(species ~ name, scales = "free")
+
+
+```
+
+```{r traceplots}
+
+for (i in 1:length(list_out)) {
+  print(
+    bayesplot::mcmc_trace(list_out[[i]]$model_fit$draws(), 
+      regex_pars = "mu0|sigma|tau|beta") +
+    labs(title = paste0("Model: ", 
+      list_out[[i]]$species,
+      ", ",
+      list_out[[i]]$drug))
+  )
+}
+
+
+
+```
+
+# Parameter values
+
+```{r plot_mods}
+
+
+bind_rows( 
+  lapply(
+    list_out, 
+    function(x) bind_cols( 
+      species = x$species, 
+      drug = x$drug,
+      bayesplot::mcmc_intervals_data(x$model_fit$draws(),
+      regex_pars = "mu0|sigma|tau|beta" )
+    )
+  )) -> df
+
+df |>
+  filter(!grepl("lp_|tau", parameter)) |>
+  ggplot(aes(parameter, m, ymin = ll, ymax = hh, color = species)) +
+  geom_point(position = position_dodge(0.3)) + 
+  geom_errorbar(width = 0, position = position_dodge(0.3)) +
+  facet_wrap(~ drug) +
+  coord_flip() -> p_a
+
+
+df |>
+  filter(grepl("tau", parameter)) |>
+  ggplot(aes(parameter, m, ymin = ll, ymax = hh, color = species)) +
+  geom_point(position = position_dodge(0.3)) + 
+  geom_errorbar(width = 0, position = position_dodge(0.3)) +
+  facet_wrap(~ drug) +
+  coord_flip() -> p_b
+
+p_a / p_b
+
+
+
+```

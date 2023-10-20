@@ -1,4 +1,4 @@
-// normally distributed log(mic) model
+
 // random intercept per participant
 // random intercept for species
 // random slope by species for drug effect

@@ -1,0 +1,690 @@
+---
+title: "Candires: modelling effect of antifungals on candida presence and MIC"
+date: today
+date-format: "D MMMM YYYY"
+format:
+  pdf:
+    mathspec: true
+    toc: true
+    number-sections: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+
+library(tidyverse)
+library(here)
+library(patchwork)
+library(viridis)
+library(cmdstanr)
+library(bayesplot)
+library(kableExtra)
+library(expm)
+
+source(here("load_mic_data.R"))
+source(here("modelling_helper_functions.R"))
+
+fu_time <- 
+  df_mics |>
+    group_by(psn, date_enrol) |>
+    summarise(max_swb_date = max(swb_date, na.rm = TRUE)) |>
+    mutate(fu_time = as.numeric(
+      difftime(max_swb_date, date_enrol, unit = "days"))
+    ) |>
+    ungroup() |>
+    summarise(
+      median_fu = median(fu_time, na.rm = TRUE),
+      lq_fu = quantile(fu_time, 0.25, na.rm = TRUE),
+      uq_fu = quantile(fu_time, 0.75, na.rm = TRUE)
+    )
+
+n_samples <- 
+df_mics |>
+  select(psn, swb_date) |>
+  unique() |> 
+  group_by(psn) |> 
+  summarise(n = n()) |>
+  ungroup() |>
+  summarise(
+      median_n = median(n, na.rm = TRUE),
+      lq_n = quantile(n, 0.25, na.rm = TRUE),
+      uq_n = quantile(n, 0.75, na.rm = TRUE)
+)
+
+```
+
+
+
+# Introduction
+
+This document describes a modelling approach to answer the following questions
+in the candires dataset:
+
+1) What is the effect of antifungal exposure (azole and echinocandin) on candida presence?
+
+2) In those who are colonised, what is the effect of antifungal exposure on
+candida MIC?
+
+For each question, I will consider the top 4 candida species by frequency (*C.
+albicans, glabrata, parapsiolsis, dubliniensis*)
+
+# Methods
+
+## Presence/absence: two state Markov models
+
+These models consider each Candida species independently. Following the MSM
+package in R, they assume that each participant can be in either a colonised (1)
+or uncolonised (0) state, and that they transition between these states with a
+constant rate: $q_{01}$ is the rate at which colonisation is acquired, and
+$q_{10}$ the rate of decolonisation The transition rate is affected by
+covariates, the effect of which is expressed as a hazard ratio on the
+transition rate. Each covariate included in the model therefore has two hazard
+ratios: one describing the effect on the rate of colonisation in the uncolonised
+(HR~01~); and one describing the effect on decolonisation (HR~01~). The
+only included covariate is antifungal exposure, and separate models were fit
+considering azole and echionocandin exposure. Antifungal exposure is
+time-varying, and is considered to have an effect only when exposure is ongoing.
+
+The models were coded in Stan v2.33 and fit via cmdstanR v0.61 in a Bayesian
+framework with weakly informative priors (normal with mean 0.1, SD 0.5 for $q$
+and student t with 3 df, mean 0 and SD 3 for covariates).
+
+Because the parameter values of these models can be a bit hard to interpret,
+I've also run some simulations from the fitted models - these assume that the
+inital prevalence is the stationary distribution of the Markov chain (i.e. the
+"average" prevalence implied by the model) and then models a 10 day drug
+exposure.
+
+
+## MIC: lognormal regression 
+
+The Markov models are quite data-hungry and trying to fit a two state Markov
+model to the MIC data (where the two states are "resistant" and "sensitive" -
+either using MIC as continuous or dichotomising) - fails, I think just due to a
+lack of data. So I fit simpler regression models, considering MIC $y_{i}$ to be
+lognormally distributed with a mean $\mu_{MIC}^{i}$ for each participant $i =
+1,2,3... n$ and standard deviation $\sigma_{MIC}$ , where $\mu_{MIC}^{i}$ is
+determined by a participant-specific random effect $\alpha$ (to account for repeated
+measures per participant) and a drug effect, $\beta$:
+
+$$
+y_{i}\; \sim\; Lognormal(\mu_{MIC}^{i},\: \sigma_{MIC})\:,\; y = 1,2..n  
+$$
+Where
+$$
+\mu_{MIC}^{i} = \mu_{0} + \beta x_{i} + \alpha_{i}  
+$$
+Where 
+$$
+\alpha_{i} \sim ~ Normal(0, \sigma_{participant})
+$$
+And $x_{i}$ determines the decay over time of the antifungal effect on MIC,
+encoded by the parameter $\tau$. If there has not yet been any antifungal
+exposure, $x_{i} = 0$, and if antifungal exposure is ongoing, it takes the value
+$x_{i} = 1$; and if antifungal exposure for participant $i$ stopped a time
+$t_{i}$ ago, it takes the value:
+$$
+x_{i} = e^{\frac{-t_{i}}{\tau}}
+$$
+i.e. it decays with a mean lifetime $\tau$.
+
+The models were coded in Stan v2.33 and fit via cmdstanR v0.61 in a Bayesian
+framework with weakly informative priors (normal with mean 0, SD 4 for
+$\mu_{0}$, student t with 3df,mean 0, SD 3 for $\beta$, student t with 3df, mean
+0, SD 6 for both $\sigma$, student t with 3df, mean 0 and SD 200 for $\tau$).
+
+# Results
+
+## Candida presence/absence
+
+### Describe data
+
+The dataset contains data on `r length(unique(df_raw$psn))` participants with
+presence/absence of different candida species at multiple time points per
+individual. There are a total of `r df_raw |> select(psn,swb_date) |> unique() |> nrow()`
+samples with a median (IQR) follow up time of 
+`r  with(fu_time, paste0(median_fu, " (",lq_fu,"-",uq_fu,")"))`
+days and a median (IQR) 
+`r with(n_samples, paste0(median_n, " (",lq_n,"-",uq_n,")"))` samples per participant. 
+Species distribution and antifungal exposure are shown in @fig-spec.
+
+```{r plot-spec}
+#| label: fig-spec
+#| fig.cap: "Distribution of species identified (A) and participants with drug exposure (B)"
+#| fig.height: 3
+#| fig.width: 6
+
+# simple distribution
+
+df_mics |>
+  select(psn,swb_date, species) |>
+  unique() |>
+  mutate(species = gsub("\\(.*\\)", "", species)) |>
+  ggplot(aes(fct_infreq(species))) +
+  geom_bar() +
+  coord_flip() +
+  theme_bw() +
+  labs(x = "") -> a
+
+df_drug |>
+  select(psn, antifung_class) |>
+  unique() |>
+  ggplot(aes(fct_infreq(antifung_class))) +
+  geom_bar() +
+  coord_flip() +
+  theme_bw() +
+  labs(x = "") -> b
+
+a + b + plot_annotation(tag_levels = "A")
+
+```
+
+### Model 
+
+```{r load-presabs-mods}
+#|include: false
+
+readRDS(here("data/fitted_stan_models.rda")) -> fitted_mods
+
+```
+
+Model outputs are shown in @fig-mod-op and @tbl-mod-op and @tbl-mod-op2. Outputs
+of simulations from fitted models are shown in @fig-mod-sims.
+ 
+```{r plot-mods}
+#| label: fig-mod-op
+#| fig.cap: "Model paramter outputs shown as mean time in state (A) and hazard ratio of colonisation/decolonisation (B)"
+#| fig.height: 8
+#| fig.width: 6
+
+bind_rows( 
+  lapply(
+    fitted_mods, 
+    function(x) bind_cols( 
+      species = x$species, 
+      drug = x$drug,
+      bayesplot::mcmc_intervals_data(x$model_fit$draws (),
+      prob_outer = 0.95)
+    )
+  )) |>
+  filter(grepl("beta", parameter)) |>
+  mutate(parameter = case_when(
+    parameter == "beta_01[1]" ~ "HR(0->1)",
+    parameter == "beta_10[1]" ~ "HR(1->0)",
+  TRUE ~ parameter)) |>
+  mutate(across(matches("^m$|^ll$|^hh$"), ~ exp(.x))) |>
+  ggplot(aes(parameter, m, ymin = ll, ymax = hh, color = species)) +
+  geom_point(position = position_dodge(0.3)) + 
+  geom_errorbar(width = 0, position = position_dodge(0.3)) +
+  facet_wrap(~ drug) +
+  coord_cartesian(ylim = c(0,8)) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  scale_color_viridis_d() +
+  theme_bw() +
+  # theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Transition", y = "Hazard ratio") -> a
+
+bind_rows( 
+  lapply(
+    fitted_mods, 
+    function(x) bind_cols( 
+      species = x$species, 
+      drug = x$drug,
+      bayesplot::mcmc_intervals_data(x$model_fit$draws (),
+      prob_outer = 0.95)
+    )
+  )) |>
+  filter(grepl("q", parameter)) |>
+  mutate(parameter = case_when(
+    parameter == "q[1]" ~ "Uncolonised",
+    parameter == "q[2]" ~ "Colonised")) |>
+  mutate(across(matches("^m$|^ll$|^hh$"), ~ 1/(.x))) |>
+  ggplot(aes(parameter, m, ymin = ll, ymax = hh, color = species)) +
+  geom_point(position = position_dodge(0.3)) + 
+  geom_errorbar(width = 0, position = position_dodge(0.3)) +
+  facet_wrap(~ drug) +
+  scale_color_viridis_d() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "State", y = "Mean days in state") -> b
+
+(b / a) + plot_layout(guides = "collect") + plot_annotation(tag_levels = "A")
+
+```
+
+```{r mod-tab1}
+#| label: tbl-mod-op
+#| tbl-cap: "Parameter values from fitted model"
+
+bind_rows( 
+  lapply(
+    fitted_mods, 
+    function(x) bind_cols( 
+      species = x$species, 
+      drug = x$drug,
+      bayesplot::mcmc_intervals_data(x$model_fit$draws (),
+      prob_outer = 0.95)
+    )
+  )) |>
+  filter(grepl("beta", parameter)) |>
+  # mutate(parameter = case_when(
+  #   parameter == "beta_01[1]" ~ "HR(Colonisation)",
+  #   parameter == "beta_10[1]" ~ "HR(Decolonisation)",
+  # TRUE ~ parameter)) |>
+  mutate(across(matches("^m$|^ll$|^hh$"), ~ exp(.x))) |>
+  bind_rows(
+    bind_rows( 
+      lapply(
+        fitted_mods, 
+        function(x) bind_cols( 
+          species = x$species, 
+          drug = x$drug,
+          bayesplot::mcmc_intervals_data(x$model_fit$draws (),
+          prob_outer = 0.95)
+        )
+      )) |>
+      filter(grepl("q", parameter)) |>
+      # mutate(parameter = case_when(
+      #   parameter == "q[1]" ~ "Mean days in state (uncolonised)",
+      #   parameter == "q[2]" ~ "Mean days in state (colonised)",
+      # TRUE ~ parameter)) |>
+      mutate(across(matches("^m$|^ll$|^hh$"), ~ 1/(.x)))) |>
+  transmute(
+    species = species,
+    drug = drug,
+    parameter = parameter,
+    str = if_else(
+      grepl("q", parameter),
+      paste0(round(m,0), " (", round(hh, 0), "-", round(ll,0),")"),
+      paste0(round(m,2), " (", round(ll, 2), "-", round(hh,2),")")
+  )) |>
+   pivot_wider(id_cols = species, 
+    names_from = c(drug, parameter),
+    values_from = str) -> df_tab
+
+# df_tab[,c(1,2,4,3,5,6,8,7,9)] -> df_tab
+
+df_tab[,c(1,2,4,3,5)] |>
+  kbl(col.names = 
+  c("Species",
+  rep(c("Azole", "Echinocandin"),2)),
+  booktabs = TRUE) |>
+  add_header_above(
+    header = 
+      c(" " = 1,
+        "HR(0->1)" = 2,
+        "HR(1->0)" = 2))
+
+```
+
+```{r tab-mod-op2}
+#| label: tbl-mod-op2
+#| tbl-cap: "Parameter values from fitted model (cont)"
+
+df_tab[,c(1,6,8,7,9)] |>
+  kbl(col.names = 
+  c("Species",
+  rep(c("Azole", "Echinocandin"),2)),
+  booktabs = TRUE) |>
+  add_header_above(
+    header = 
+      c(" " = 1,
+        "Mean days in state\n(uncolonised)" = 2,
+        "Mean days in state\n(colonised)" = 2))
+
+
+```
+
+```{r sim}
+#| label: fig-mod-sims
+#| fig.cap: "Simulated Candida prevalence for a 10 day drug exposure stratified by species and drug"
+#| fig.height: 5
+#| fig.width: 5
+
+# load sims - these are generated by the 
+# sim_from_fitted_models.R script
+
+sims <- read_rds( "data/sims_list_summary_df.rda",) 
+
+sims |>
+  as_tibble() |>
+  ggplot(aes(t, pr_1_med, ymin = lci, ymax = uci, fill = species, color =
+    species)) +
+  geom_line() +
+  geom_ribbon(alpha = 0.5, color = NA) +
+  facet_grid(factor(species, levels = 
+c("albicans", "glabrata", "parapsilosis", "dubliniensis")) ~ drug) +
+  xlim(c(0,30)) +
+scale_fill_viridis_d() +
+theme_bw() +
+labs(y = "Simulated prevalence", x = "Time (days)") +
+theme(legend.position = "none")
+
+
+
+
+```
+
+
+### Conclusions
+
+The mean time in state values (i.e the values of $q_{01}$ and $q_{10}$) reflect
+the relative prevalence of the different species; dublinensis and parapsiolosis
+are lost more quickly, on average, and gained more slowly, than glabrata and
+albicans. The effect of antifungal exposure has wide uncertainty intervals;
+azole exposure generally acts to reduce the rate of acquisition across all
+species - the most convincing effect is for glabrata. But in this species it
+also reduces the rate of loss such that the overall prevalence remains ~
+constant. For all other species, azoles generally act to increase loss or are ~
+neutral such that the combined effect of azole exposure is to reduce
+colonisation prevalence.
+
+Effect of echinocandins again have wide confidence intervals but act generally
+to increase rates of acquisition across all species. However the effects on loss
+vary by species - they act to prolong carriage of glabrata and parapsilosis and
+shorten duration of carriage for albicans and dubliniensis. Overall, these
+effects mean that colonisation prevalence increases for echinocandin exposure
+for glabrata and parapsiolosis, and reduces for albicans and dubliniensis.
+
+\newpage
+
+## MIC
+
+### Describe data  
+
+Of the `r df_raw |> select(psn,swb_date) |> unique() |> nrow()` samples, 
+`r df_raw |> filter(isol_species != "not detected") |> select(psn,swb_date) |> unique() |> nrow()`
+have grown at least one Candida species and `r df_mics |>
+filter(!is.na(mic)) |> select(psn,swb_date) |> unique() |> nrow()` have an MIC
+determined. Number of MICs determined by species is shown in @fig-micbyspec. For 
+each sample for which an MIC is determined, a panel of different drug MICs are
+determined. In what follows, I will consider fluconazole MICs (and their
+association with azole exposure) and anidulafungin MICs (and their link to
+chinocandin exposure). Time trends in MIC by participant are shown in
+@fig-micbyperson-azole and @fig-micbyperson-anidula for these drugs.
+
+```{r plot-mic-by-spec}
+#| label: fig-micbyspec
+#| fig.cap: "MICs determined by species"
+#| fig.height:  4
+#| fig.width: 8
+
+df_raw |>
+  filter(isol_species != "not detected") |>
+  select(psn, swb_date, isol_species) |>
+  unique() |>
+  left_join(
+    df_mics |>
+  select(psn, swb_date, species) |>
+  unique() |>
+  mutate(mic = "mic determined"),
+    by = c("psn" = "psn",
+      "swb_date" = "swb_date",
+      "isol_species" = "species")
+  ) |>
+  mutate(mic = if_else(is.na(mic), "mic not determined", mic)) |>
+  ggplot(aes(fct_infreq(isol_species), fill = mic)) +
+  geom_bar() +
+  coord_flip() +
+  theme_bw() +
+  labs(x = "Species")
+
+
+```
+
+
+
+```{r plot-mic2}
+#| label: fig-micbyperson-azole
+#| fig.cap: "log(MIC) vs time by participant for fluconazole. Lines show a linear regression for each participant. Plots are split by those who received no azole during the study period (top) and those who did (bottom). For those who received azole t = 0 is defined as the time of their first dose; for those who received no azole, t= 0 is time of enrollment." 
+#| fig.height:  6
+#| fig.width: 8
+
+generate_mic_model_data(
+  df_mics,
+  df_drug,
+  spec = c("albicans", "glabrata", "dubliniensis", "parapsilosis"),
+  exposure_drug_class = "Azole",
+  mic_drug = "fluconazole",
+  code_antifungal_exposure_as = "zero_at_first_exposure"
+) |>
+  ggplot(aes(days_since_first_drug_exposure,
+    log(mic),
+    group = psn,
+    # group = any_drug_exposure,
+    color = any_drug_exposure
+  )) +
+  geom_point(alpha = 0.5) +
+  # geom_line(alpha = 0.5) +
+  # geom_density2d(position = position_jitter(width = 0.1)) +
+  # geom_line() +
+  geom_smooth(method = "lm", se = FALSE, size = 0.5, alpha = 0.3) +
+  facet_grid(any_drug_exposure ~ species, scales = "free") +
+  theme_bw() +
+  theme(legend.position = "top") +
+  labs(title = "Fluconazole log(MIC) vs time")
+
+```
+
+```{r plot-mic}
+#| label: fig-micbyperson-anidula
+#| fig.cap: "log(MIC) vs time by participant. Lines show a linear regression for each participant. Plots are split by those who received no echinocandin during the study period (top) and those who did (bottom). For those who received echinocandin t = 0 is defined as the time of their first dose; for those who received no echinocandin, t= 0 is time of enrollment." 
+#| fig.height:  6
+#| fig.width: 8
+
+generate_mic_model_data(
+  df_mics,
+  df_drug,
+  spec = c("albicans", "glabrata", "dubliniensis", "parapsilosis"),
+  exposure_drug_class = "Echinocandin",
+  mic_drug = "anidulafungin",
+  code_antifungal_exposure_as = "zero_at_first_exposure"
+) |>
+  ggplot(aes(days_since_first_drug_exposure,
+    log(mic),
+    group = psn,
+    # group = any_drug_exposure,
+    color = any_drug_exposure
+  )) +
+  geom_point(alpha = 0.5) +
+  # geom_line(alpha = 0.5) +
+  # geom_density2d(position = position_jitter(width = 0.1)) +
+  # geom_line() +
+  geom_smooth(method = "lm", se = FALSE, size = 0.5, alpha = 0.3) +
+  facet_grid(any_drug_exposure ~ species, scales = "free") +
+  theme_bw() +
+  theme(legend.position = "top") +
+  labs(title = "Anidulafungin log(MIC) vs time")
+
+```
+
+\newpage
+
+### Model
+
+
+Outputs from the MIC models are shown in @fig-micmods, @tbl-micmod and
+@tbl-micmod2.
+
+```{r lod-mic-mod}
+
+# generated by fit_stan_mic_mods.qmd
+
+fitted_mic_models <- 
+  read_rds(here("data/fitted_stan_mic_models.rda"))
+
+```
+
+
+```{r plot-mic-models}
+#| label: fig-micmods
+#| fig.cap: "Parameter values from MIC models with 95% CrI. (A) shows effect of antifungal exposure on log(MIC) - the change in mean log(MIC) when antifungal exposure is present. Zero (dotted line) is no effect. (B) shows the standard deviation of the participant random effect on log(MIC) (sigma_participant) and the mean and standard deviation of the fitted normal distribution of log(MIC). The distributions are centered so mu_0 would be xpected to be 0. (C) shows the fitted effect of tau, a measure of the effect of antifungal effect after exposure has finished. It can be interpreted as the mean lifetime of the decay of the, or is the half life of the efefct divided by 0.693."
+#| fig.height:  8
+#| fig.width: 8
+
+bind_rows( 
+  lapply(
+    fitted_mic_models, 
+    function(x) bind_cols( 
+      species = x$species, 
+      drug = x$drug,
+      bayesplot::mcmc_intervals_data(x$model_fit$draws(),
+      regex_pars = "mu0|sigma|tau|beta",
+      prob_outer = 0.95)
+    )
+  )) -> df
+
+
+df |>
+  filter(grepl("beta", parameter)) |>
+  ggplot(aes(parameter, m, ymin = ll, ymax = hh, color = species)) +
+  geom_point(position = position_dodge(0.3)) + 
+  geom_errorbar(width = 0, position = position_dodge(0.3)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~ drug) +
+  coord_flip() +
+  scale_color_viridis_d() +
+  theme_bw() -> p_a
+
+df |>
+  filter(!grepl("lp_|tau|beta", parameter)) |>
+  ggplot(aes(parameter, m, ymin = ll, ymax = hh, color = species)) +
+  geom_point(position = position_dodge(0.5)) + 
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_errorbar(width = 0, position = position_dodge(0.5)) +
+  facet_wrap(~ drug) +
+  coord_flip() +
+  scale_color_viridis_d() +
+  theme_bw() -> p_b
+
+
+
+df |>
+  filter(grepl("tau", parameter)) |>
+  ggplot(aes(parameter, m, ymin = ll, ymax = hh, color = species)) +
+  geom_point(position = position_dodge(0.3)) + 
+  geom_errorbar(width = 0, position = position_dodge(0.3)) +
+  facet_wrap(~ drug) +
+  coord_flip() +
+  scale_color_viridis_d() +
+  theme_bw() -> p_c
+
+(p_a / p_b / p_c) + plot_layout(guides = "collect") + plot_annotation(tag_levels
+  = "A")
+
+
+```
+
+
+```{r mic-mod-tabs}
+#| label: tbl-micmod
+#| tbl-cap: "Parameter values from MIC fitted model considering effect of azole exposure on fluconazole MIC"
+#| tbl-pos: H
+
+df |>
+filter(drug == "Azole") |>
+  transmute(
+    species = species,
+    parameter = parameter,
+    str = if_else(
+      grepl("tau", parameter),
+      paste0(round(m,0), " (", round(ll, 0), "-", round(hh,0),")"),
+      paste0(round(m,2), " (", round(ll, 2), "-", round(hh,2),")")
+  )) |>
+   pivot_wider(id_cols = species, 
+    names_from = c(parameter),
+    values_from = str) |>
+  kbl(booktabs = TRUE) |>
+  add_header_above(
+    header = 
+      c(" " = 1, "Azole" = 5)) |>
+  kable_styling(latex_options="scale_down")
+
+
+```
+
+
+```{r mic-mod-tabs2}
+#| label: tbl-micmod2
+#| tbl-cap: "Parameter values from fitted MIC model considering the effect of echinocandin exposure on anidulafungin MIN"
+#| tbl-pos: H
+
+df |>
+filter(drug == "Echinocandin") |>
+  transmute(
+    species = species,
+    parameter = parameter,
+    str = if_else(
+      grepl("tau", parameter),
+      paste0(round(m,0), " (", round(ll, 0), "-", round(hh,0),")"),
+      paste0(round(m,2), " (", round(ll, 2), "-", round(hh,2),")")
+  )) |>
+   pivot_wider(id_cols = species, 
+    names_from = c(parameter),
+    values_from = str) |>
+  kbl(booktabs = TRUE) |>
+  add_header_above(
+    header = 
+      c(" " = 1, "Echinocandin" = 5)) |>
+  kable_styling(latex_options="scale_down")
+
+
+```
+
+### Conclusions
+
+There is no evidence for a strong effect of drug exposure on MIC from these
+models. There is some association between echinocandin exposure and *lower*
+parapsiolsis MIC to anidulafungin, and *lower* glabrata MIC to flucoazole and
+azole exposure. I wonder if this latter in particular is influenced by the
+outlier of a participant with very resistant candida who is drug unexposed;
+confounding is also possible. However, the size of the within-person effect is
+reasonably significant; the SD of the participant effect (sigma_participant) is
+~ 1 meaning that ~ a third of people will have an effect on log(MIC) of greater
+than 1; it's a natural log so a ~ 2.7 fold change. I'd interpret this by saying
+that emergent resistance on treatment on the timescale of the study is unusual -
+the major determinant of MIC is the species and clone that you acquire/carry.
+This individual effect may be explained by other covariates that are not
+included in the models.
+
+The uncertainty in the tau parameter is very large - this makes intuitive sense
+- if the effect of drug exposure in MIC is weak then it's hard to estimate the
+effect of this exposure over time.
+
+# Overall Conclusions
+
+There is some evidence for an effect of antifungal drug exposure on candida
+colonisation that varies by drug and species.
+
+There is, overall (and perhaps unexpectedly?), an association between azole
+exposure and lower prevalence of candida colonisation across all species; this
+is seen the least in glabrata. Azoles in these models act to reduce the rate of
+acquisition; for glabrata, they act to reduce decolonisation such that these
+rates balance out on average. For the other species they act to increase rate of
+decoloniation (dublinensis, albicans) or have no convincing effect
+(parapsilosis).
+
+Echinocandins act, overall, to increase colonisation prevalence of glabrata and
+parapsilopsis, and reduce colonisation prevalence with dubliniensis and
+albicans. They act on all species to increase rates of colonisation acquisition
+(though with varying magnitude) and so the overall effect is driven by a
+species-dependent effect on duration of colonisation: either prolong (glabrata,
+paraposilosis) or shorten (albicans, dublinensis).
+
+In those who are continually colonised, the MIC models suggest that the
+association of antifungal exposure with emergent resistance (i.e. increase in
+MIC) is limited. There is an important individual association with MIC, which
+could be explained by other covariates, perhaps. There is some evidence for an
+association between azole exposure and *lower* glabrata fluconazole MIC, and
+parapsilosis echinocandin exposure and *lower* anidulafungin MIC.
+
+Overall I would say that candida species is a major determinant of colonisation
+dynamics and resistance; drug exposure has associations with colonisation
+prevalence both to increase and decrease, depending on agent and species.
+Emergent resistance on treatment is unusual on the timescale of the study and
+there is significant variation between participants in azole/echinocandin MIC
+that is unexplained by drug exposure.
