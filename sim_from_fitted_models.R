@@ -95,6 +95,11 @@ for (i in seq_len(length(fitted_mods))) {
     stop("More than one initial p1?")
   }
 
+  draws_matrix <- 
+  fitted_mods[[i]]$model_fit$draws(
+        format = "draws_matrix"
+      ) |>
+        as.data.frame()
 
   sim_df <-
     expand_grid(
@@ -102,12 +107,9 @@ for (i in seq_len(length(fitted_mods))) {
         t = t_steps,
         abx = c(rep(1, abx_days), rep(0, length(t) - abx_days))
       ),
-      fitted_mods[[i]]$model_fit$draws(
-        format = "draws_matrix"
-      ) |>
-        as.data.frame()
-    ) |>
-    mutate(draw = rep(seq_len(nrow(d)), length(t_steps))) |>
+    draws_matrix
+       ) |>
+    mutate(draw = rep(seq_len(nrow(draws_matrix)), length(t_steps))) |>
     janitor::clean_names() |>
     rowwise() |>
     mutate(pr_1 = pr_state1(

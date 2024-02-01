@@ -3,7 +3,7 @@ require(tidyverse)
 require(here)
 # split off micr measurements and drugs in to seperate dataframes 
 
-path <- here("data-raw/long_df_mic_061023.csv")
+path <- here("data-raw/long_df_mic_160124.csv")
 
 df_raw <- read_csv(path)
 
