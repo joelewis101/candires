@@ -1,0 +1,765 @@
+---
+title: Improving the candires MIC models
+author: Joe Lewis
+date: today
+date-format: "D MMMM YYYY"
+format:
+  pdf:
+    mathspec: true
+    toc: true
+    number-sections: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+# Introduction
+
+## Building on the random effects model
+
+The current MIC models I've built have a random intercept per participant to
+account for repeated sampling of people. This assumes lognormally distributed
+MICs and fits a different mean for the distribution for each participant. This
+is necessary because the model needs to account for within-person correlation of
+MIC; but it's pretty crude and probably doesn't represent what we want. The
+effect is fixed throughout time, but the true individual effect probably decays
+with time. Also you can imagine that if a participant has a low MIC at time $a$
+and high MIC at time $b$ the model will fit a baseline risk between the two,
+which might not be what we want, because this *change* is what we are interested
+in. It might pull some of the drug effect into the random intercept. 
+
+An possible improvement on this could be a *Gaussian process* model. This
+assumes that samples within participants are correlated in time, with a decaying
+effect the time scale of which is fitted by the model. Given enough time
+separation, the within-participant correlation falls to 0. This is probably a
+better representation of our conceptual model of what is happening. 
+
+Formally, we have $n$ measurements of a normally distributed outcome variable (i.e.
+log-transformed MIC) for $N$ participants; each may have a different number of
+measurements. We can construct a regression model where the measurements $y_{i},
+i = 1,2 ... n$ are given by:
+
+$$
+y_{i} \sim \text{Normal}(\mu_{i}, \sigma_{MIC}) 
+$$
+
+I.e. each sample is drawn from a normal distribution with mean $\mu_{i}$ but a
+fixed population standard deviation $\sigma_{MIC}$.
+
+Switching to vector notation (bold type lowercase indicates a vector, bold
+uppercase a matrix) we can define the $i$ length vector $\boldsymbol{\mu}$ as
+
+$$
+\boldsymbol{\mu} = \mu_{0} + \boldsymbol{X}\boldsymbol{\beta} + \boldsymbol{f}
+$$
+
+Where the scalar $\mu_{0}$ is the intercept, $\boldsymbol{\beta}$ is the vector
+of covariates (length $c$ equal to number of covariates), $\boldsymbol{X}$ is
+the design matrix of covariate values (with $c$ columns and $n$ rows, one per
+sample), and $\boldsymbol{f}$ is a length $n$ vector with the gaussian process
+effect per observation. This is drawn from a multivariate normal distribution: 
+
+$$
+\boldsymbol{f} \sim \text{MVN}(0, \boldsymbol{\Sigma})
+$$
+
+Where $\boldsymbol{\Sigma}$ is the covariance matrix; this encodes the temporal
+correlation of the samples. We make it a block-diagonal covariance matrix equal
+to 0 for samples from different participants, and an exponentiated quadratic
+kernel for samples from the same participant. That is, for a given pair of
+observations $i$ and $j$ with time difference $t_{ij}$ between them, the
+covariance is
+
+$$
+\Sigma_{ij} = \alpha^{2} \text{exp}(-\frac{-t^{2}_{ij}}{2l^{2}}) 
+$$
+
+
+Here $\alpha$ encodes the magnitude of covariance and $l$ the temporal
+correlation.  This is one of many possible choices: it's a common choice in
+gaussian process models.
+
+To make it easier computationally, and following the Stan user manual, we can
+use the fact that it is possible to rescale a multivariate normal distribution
+as the product of the Cholesky decomposition of the covariance matrix and an
+isotropic normal variable, i.e:
+
+$$
+\boldsymbol{L\eta} \sim \text{MVN}(0,\boldsymbol{\Sigma})
+$$
+Where 
+$$
+\boldsymbol{\eta} \sim \text{Normal}(\boldsymbol{0}, \boldsymbol{I})  
+$$
+and  
+$$
+\boldsymbol{L}^{T}\boldsymbol{L} = \boldsymbol{\Sigma}
+$$
+
+i.e. $\boldsymbol{L}$ is the Cholesky decomposition of $\boldsymbol{\Sigma}$.
+
+We define the covariate effect in exactly the same was as the simpler random
+intercept models; that is, for a given sample $i$ and covariate $j$ the matrix
+$X_{ij}$ is defined by:
+
+$$
+X_{ij} = 
+  \begin{cases}
+  0 & \text{if not antifungal exposure for covariate $j$}\\
+  1 & \text{if ongoing antifungal exposure for covariate $j$}\\
+  e^{\frac{-t_{ij}}{\tau}} & \text{if prior antifungal exposure a time $t_{ij}$
+    ago for covariate $j$}\\
+  \end{cases}
+$$
+
+
+## Back to a simpler approach
+
+Taking a step back, this modelling approach assesses for a population shift in
+MIC following antifungal exposure. But an alternate conception of this is that
+there is a stochastic aquisition of resistance associated mutations, which will
+result in no change in MIC for most samples, but some will develop resistance.
+So let's try a dichotomised model - define "acquisition of resistance" as a
+log~2~ fold increase of 2 or more, and plot the proportion of participants who
+have this change from baseline. Because the sampling is all at different times,
+we can use a LOESS regression line to estimate the proportion of participants
+who have acquisition of resistance, as defined in this way, and plot id against
+days since drug exposure. We need to compare to the antifungal unexposed group -
+to put them on the same axis I've aribtrarily defined "days since drug exposure"
+to be "days since enrollment." I've also tabulated the number of isolates.
+
+To do some statistical tests I've followed Phoebe's original analysis -
+comparing people without a given drug exposure to those with an exposure and
+looking at proportion of those with a log~2~ fold increase in MIC of 2 or more.
+I've then used a Fisher test to test for equality of these proportions.
+
+# Results
+
+## Log~2~ change in MIC
+
+Start with the simple approach. The log2 fold change in MIC compared baseline
+MIC is shown in the plots below, as well as an estimated proportion of samples
+that have a greater than or equal to log~2~ fold change in MIC compared to
+baseline. The actual numbers of isolates are shown in the tables, as are the
+proportion of participants with emergent resistance.
+
+The first thing to say is that there are small numbers of parapsilosis and
+dublinensis which make drawing any conclusion difficult, and that a log~2~ fold
+increase in MIC of 2 or more happens infrequently across all species for both
+azole and echionocandin. However, when it does happen, it is associated with
+drug exposure - this is most clearly the case in fluconazole and azole exposure
+in albicans (p = 0.006) and glabrata (p = 0.02). Wide confidence intervals make
+it more difficult to interpret anidulafungin MIC and echinocandin exposure but
+there were more particioants with log~2~ (fold MIC increase) of at least 2 in
+the albicans echincocandid exposed (6/54 [11%]) versus unexposed (3/102 [3%], p
+= 0.07) and the glabrata echionocandin exposed (1/27 [4%]) versus unexposed
+(0/35 [0%], p = 0.4)
+
+
+
+```{r setup} 
+#| include: false
+
+library(tidyverse)
+library(msm)
+library(here)
+library(ivs)
+library(bayesplot)
+library(patchwork)
+library(kableExtra)
+
+
+source(here("load_mic_data.R"))
+source(here("modelling_helper_functions.R"))
+
+library(cmdstanr)
+```
+
+```{r mic_fold_change_plots}
+
+species <- c("albicans", "glabrata", "dubliniensis", "parapsilosis")
+drug <- c("Azole", "Echinocandin")
+
+listout <- list()
+p <- 1
+for (current_species in species) {
+  for (current_drug in drug) {
+    if (current_drug == "Azole") {
+      current_mic_drug <- "fluconazole"
+    } else {
+      current_mic_drug <- "anidulafungin"
+    }
+
+    df_fold_change <-
+      generate_mic_model_data(
+        df_mics,
+        df_drug,
+        spec = current_species,
+        exposure_drug_class = current_drug,
+        mic_drug = current_mic_drug,
+        code_antifungal_exposure_as = "zero_at_first_exposure"
+      ) |>
+      group_by(psn) |>
+      arrange(psn, swb_date) |>
+      mutate(
+        baseline_mic = first(mic)
+      ) |>
+      ungroup() |>
+      mutate(mic_fold_change = mic / baseline_mic)
+
+    p_b <-
+      df_fold_change |>
+      ggplot(aes(days_since_first_drug_exposure,
+        as.numeric(log2(mic_fold_change) >= 2),
+        group = any_drug_exposure,
+        color = any_drug_exposure
+      )) +
+      geom_smooth() +
+      theme_bw() +
+      theme(legend.position = "top") +
+      labs(
+        title = paste0(
+          "Proportion of ",
+          current_species,
+          " >= 2 log2 fold change in\n",
+          current_mic_drug,
+          " MIC"
+        ),
+        subtitle = paste0(
+          "Following ",
+          current_drug,
+          " exposure"
+        ),
+        y = "proportion"
+      )
+
+    p_a <-
+      df_fold_change |>
+      ggplot(aes(days_since_first_drug_exposure,
+        log2(mic_fold_change),
+        group = psn,
+        color = any_drug_exposure
+      )) +
+      geom_point(alpha = 0.5) +
+      geom_line() +
+      theme_bw() +
+      theme(legend.position = "top") +
+      labs(
+        title = paste0(
+          current_species, " log2 fold change in ",
+          current_mic_drug, " MIC"
+        ),
+        subtitle = paste0(
+          "Following ", current_drug, " exposure"
+        ),
+        y = "log2(mic fold change)"
+      )
+
+
+    listout[[p]] <-
+      p_a + p_b +
+        plot_layout(guides = "collect") &
+        theme(legend.position = "bottom")
+    p <- p + 1
+  }
+}
+```
+
+
+```{r}
+#| output: asis
+res <- map2_chr(listout, list(1,2,3,4,5,6,7,8), \(plots, no) {
+  knitr::knit_child(text = c(
+    "```{r}",
+    paste0("#|", " label: fig-micplot", no),
+    '#| fig.cap: "log2[MIC fold change] (left) from baseline and proportion of isolates with 2 or higher log2 fold change (right). Lines link isolates from one participant in the left panel. Colors show if participants are antifungal exposed or unexposed."',
+    "#| fig.height: 5",
+    "#| fig.width: 10",
+    "#| echo: false",
+    "plots",
+    "```",
+    ""
+  ), envir = environment(), quiet = TRUE)
+})
+cat(res, sep = "\n")
+```
+
+```{r} 
+#| label: tbl-acqres1
+#| tbl-cap: "Number of isolates that have a log2 fluconazole MIC fold change of at least 2, stratified by whether the patient has any azole exposure at all, and time since antimicrobial exposure. For those with no azole exposure at all, the days since drug exposure variable is set to days since enrolment"
+
+
+current_drug <- drug[[1]]
+if (current_drug == "Azole") {
+  current_mic_drug <- "fluconazole"
+} else {
+  current_mic_drug <- "anidulafungin"
+}
+
+
+
+listout <- list()
+p <- 1
+for (current_species in species) {
+  listout[[p]] <-
+    generate_mic_model_data(
+      df_mics,
+      df_drug,
+      spec = current_species,
+      exposure_drug_class = current_drug,
+      mic_drug = current_mic_drug,
+      code_antifungal_exposure_as = "zero_at_first_exposure"
+    ) |>
+    group_by(psn) |>
+    arrange(psn, swb_date) |>
+    mutate(
+      baseline_mic = first(mic)
+    ) |>
+    ungroup() |>
+    mutate(
+      mic_fold_change = mic / baseline_mic,
+      days_since_exposure_cat = cut(
+        days_since_first_drug_exposure,
+        seq(from = -70, to = 1400, by = 14)
+      ),
+      acq_res = log2(mic_fold_change) >= 2
+    ) |>
+    mutate(
+      acq_res = as.factor(acq_res),
+      any_drug_exposure = as.factor(any_drug_exposure)
+    ) |>
+    count(days_since_exposure_cat, any_drug_exposure, acq_res, .drop = FALSE) |>
+    group_by(days_since_exposure_cat, any_drug_exposure) |>
+    mutate(total = sum(n)) |>
+    filter(acq_res == "TRUE", total > 0) |>
+    rowwise() |>
+    mutate(
+      prop = n / total,
+      lci = binom.test(n, total)$conf.int[[1]],
+      uci = binom.test(n, total)$conf.int[[2]]
+    ) |>
+    mutate(str = paste0(
+      n, "/", total, " (", round(prop * 100, 0), "% [95% CI ",
+      round(lci * 100, 0), "-", round(uci * 100, 0), "%])"
+    )) |>
+    select(c(days_since_exposure_cat, any_drug_exposure, str)) |>
+    pivot_wider(
+      id_cols = days_since_exposure_cat,
+      names_from = any_drug_exposure,
+      values_from = str,
+      values_fill = "0/0"
+    ) |>
+    rename(drug_exposed = `TRUE`, drug_unexposed = `FALSE`) |>
+  select(days_since_exposure_cat, drug_unexposed, drug_exposed)
+  p <- p + 1
+}
+
+
+
+listout[[1]] |>
+  left_join(listout[[2]],
+    by = "days_since_exposure_cat"
+  ) |>
+  mutate(across(everything(), \(x) if_else(is.na(x), "0/0", x))) |>
+  kbl(
+    booktabs = TRUE,
+    col.names =
+      c(
+        "days since\ndrug exposure",
+        rep(c("Azole unexposed", "Azole exposed"), 2)
+      )
+  ) |>
+  add_header_above(c(
+    " " = 1, "albicans" = 2, "glabrata" = 2
+  )) |>
+  kable_styling(latex_options = "scale_down")
+```
+
+```{r} 
+#| label: tbl-acqres2
+#| tbl-cap: "Number of isolates that have a log2 fluconazole MIC fold change of at least 2, stratified by whether the patient has any azole exposure at all, and time since azole exposure. For those with no antimicrobial exposure at all, the days since drug exposure variable is set to days since enrolment"
+
+listout[[2]] |>
+  left_join(listout[[3]],
+    by = "days_since_exposure_cat"
+  ) |>
+  mutate(across(everything(), \(x) if_else(is.na(x), "0/0", x))) |>
+  kbl(
+    booktabs = TRUE,
+    col.names =
+      c(
+        "days since\ndrug exposure",
+        rep(c("Azole unexposed", "Azole exposed"), 2)
+      )
+  ) |>
+  add_header_above(c(
+    " " = 1, "dubliniensis" = 2, "papapsilosis" = 2
+  )) |>
+  kable_styling(latex_options = "scale_down")
+```
+
+
+
+
+```{r} 
+#| label: tbl-acqres3
+#| tbl-cap: "Number of isolates that have a log2 anidulafungin MIC fold change of at least 2, stratified by whether the patient has any echinocandin exposure at all, and time since echinocandin exposure. For those with no echinocandin exposure at all, the days since drug exposure variable is set to days since enrolment"
+
+
+
+species <- c("albicans", "glabrata", "dubliniensis", "parapsilosis")
+current_drug <- drug[[2]]
+if (current_drug == "Azole") {
+  current_mic_drug <- "fluconazole"
+} else {
+  current_mic_drug <- "anidulafungin"
+}
+listout <- list()
+p <- 1
+for (current_species in species) {
+  listout[[p]] <-
+    generate_mic_model_data(
+      df_mics,
+      df_drug,
+      spec = current_species,
+      exposure_drug_class = current_drug,
+      mic_drug = current_mic_drug,
+      code_antifungal_exposure_as = "zero_at_first_exposure"
+    ) |>
+    group_by(psn) |>
+    arrange(psn, swb_date) |>
+    mutate(
+      baseline_mic = first(mic)
+    ) |>
+    ungroup() |>
+    mutate(
+      mic_fold_change = mic / baseline_mic,
+      days_since_exposure_cat = cut(
+        days_since_first_drug_exposure,
+        seq(from = -70, to = 1400, by = 14)
+      ),
+      acq_res = log2(mic_fold_change) >= 2
+    ) |>
+    mutate(
+      acq_res = factor(as.character(acq_res), levels = c("FALSE", "TRUE")),
+      any_drug_exposure = as.factor(any_drug_exposure)
+    ) |>
+    count(days_since_exposure_cat, any_drug_exposure, acq_res, .drop = FALSE) |>
+    group_by(days_since_exposure_cat, any_drug_exposure) |>
+    mutate(total = sum(n)) |>
+    filter(acq_res == "TRUE", total > 0) |>
+    rowwise() |>
+    mutate(
+      prop = n / total,
+      lci = binom.test(n, total)$conf.int[[1]],
+      uci = binom.test(n, total)$conf.int[[2]]
+    ) |>
+    mutate(str = paste0(
+      n, "/", total, " (", round(prop * 100, 0), "% [95% CI ",
+      round(lci * 100, 0), "-", round(uci * 100, 0), "%])"
+    )) |>
+    select(c(days_since_exposure_cat, any_drug_exposure, str)) |>
+    pivot_wider(
+      id_cols = days_since_exposure_cat,
+      names_from = any_drug_exposure,
+      values_from = str,
+      values_fill = "0/0"
+    ) |>
+    rename(drug_exposed = `TRUE`, drug_unexposed = `FALSE`) |>
+  select(days_since_exposure_cat, drug_unexposed, drug_exposed)
+  p <- p + 1
+}
+
+
+
+listout[[1]] |>
+  left_join(listout[[2]],
+    by = "days_since_exposure_cat"
+  ) |>
+  mutate(across(everything(), \(x) if_else(is.na(x), "0/0", x))) |>
+  kbl(
+    booktabs = TRUE,
+    col.names =
+      c(
+        "days since\ndrug exposure",
+        rep(c("Echinocandin unexposed", "Echinocandin exposed"), 2)
+      )
+  ) |>
+  add_header_above(c(
+    " " = 1, "albicans" = 2, "glabrata" = 2
+  )) |>
+  kable_styling(latex_options = "scale_down")
+
+```
+
+```{r} 
+#| label: tbl-acqres4
+#| tbl-cap: "Number of isolates that have a log2 anidulafungin MIC fold change greater than 2, stratified by whether the patient has any echinocandin exposure at all, and time since echinocandin exposure. For those with no echinocandin exposure at all, the days since drug exposure variable is set to days since enrolment"
+listout[[3]] |>
+  left_join(listout[[4]],
+    by = "days_since_exposure_cat"
+  ) |>
+  mutate(across(everything(), \(x) if_else(is.na(x), "0/0", x))) |>
+  kbl(
+    booktabs = TRUE,
+    col.names =
+      c(
+        "days since\ndrug exposure",
+        rep(c("Echinocandin unexposed", "Echinocandin exposed"), 2)
+      )
+  ) |>
+  add_header_above(c(
+    " " = 1, "dubliniensis" = 2, "parapsilosis" = 2
+  )) |>
+  kable_styling(latex_options = "scale_down")
+
+```
+
+```{r} 
+#| label: tbl-acqres-bypt
+#| tbl-cap: "Number of study participants with emergent resistance (defined by an increase in log2(mic fold change) of at least 2) to fluconazole stratified by azole exposure and species"
+
+
+current_drug <- drug[[1]]
+if (current_drug == "Azole") {
+  current_mic_drug <- "fluconazole"
+} else {
+  current_mic_drug <- "anidulafungin"
+}
+    generate_mic_model_data(
+      df_mics,
+      df_drug,
+      # spec = current_species,
+      exposure_drug_class = current_drug,
+      mic_drug = current_mic_drug,
+      code_antifungal_exposure_as = "zero_at_first_exposure"
+    )   |>
+    group_by(psn, species) |>
+    arrange(species, psn, swb_date) |>
+    mutate(
+      baseline_mic = first(mic),
+    ) |> 
+    filter(!(any_drug_exposure & days_since_first_drug_exposure < 0)) |>
+    group_by(species, psn, any_drug_exposure) |>
+    summarise(
+      log2mic_inc= 
+        if_else(any(log2(mic / baseline_mic) >= 2), ">=2","<2"),
+      log2mic_inc = as.factor(log2mic_inc)) |>
+    ungroup() |>
+    mutate(any_drug_exposure = if_else(any_drug_exposure, "drug_exposed",
+"drug_unexposed")) |>
+  count(species, any_drug_exposure, log2mic_inc, .drop = "none") |>
+    pivot_wider(id_cols = c(species, any_drug_exposure), 
+    names_from = log2mic_inc,
+    values_from = n)  |>
+    nest(data = c(any_drug_exposure, `>=2`,`<2`)) |>
+mutate(p = map(data, \(x) fisher.test(x[,2:3])$p.value)) |>
+    unnest(cols = c(data, p)) |>
+    rowwise() |>
+    mutate(tot = `<2` + `>=2`,
+           prop = `>=2` / tot,
+           str = paste0(`>=2`, "/", tot, " (",round(prop*100,0),"%)")) |>
+    select(species, any_drug_exposure, str, p) |>
+    pivot_wider(id_cols = c(species, p),
+    names_from = any_drug_exposure,
+values_from = str) |>
+    relocate(p, .after = everything()) |>
+  kbl(
+    booktabs = TRUE)
+ 
+
+```
+
+```{r} 
+#| label: tbl-acqres-bypt2
+#| tbl-cap: "Number of study participants with emergent resistance (defined by an increase in log2(mic fold change of at least 2) to anidulafungin stratified by echinocandin exposure and species"
+
+
+current_drug <- drug[[2]]
+if (current_drug == "Azole") {
+  current_mic_drug <- "fluconazole"
+} else {
+  current_mic_drug <- "anidulafungin"
+}
+    generate_mic_model_data(
+      df_mics,
+      df_drug,
+      # spec = current_species,
+      exposure_drug_class = current_drug,
+      mic_drug = current_mic_drug,
+      code_antifungal_exposure_as = "zero_at_first_exposure"
+    )   |>
+    group_by(psn, species) |>
+    arrange(species, psn, swb_date) |>
+    mutate(
+      baseline_mic = first(mic),
+    ) |> 
+    filter(!(any_drug_exposure & days_since_first_drug_exposure < 0)) |>
+    group_by(species, psn, any_drug_exposure) |>
+    summarise(
+      log2mic_inc= 
+        if_else(any(log2(mic / baseline_mic) >= 2), ">=2","<2"),
+      log2mic_inc = as.factor(log2mic_inc)) |>
+    ungroup() |>
+    mutate(any_drug_exposure = if_else(any_drug_exposure, "drug_exposed",
+"drug_unexposed")) |>
+  count(species, any_drug_exposure, log2mic_inc, .drop = "none") |>
+    pivot_wider(id_cols = c(species, any_drug_exposure), 
+    names_from = log2mic_inc,
+    values_from = n)  |>
+    nest(data = c(any_drug_exposure, `>=2`,`<2`)) |>
+mutate(p = map(data, \(x) fisher.test(x[,2:3])$p.value)) |>
+    unnest(cols = c(data, p)) |>
+    rowwise() |>
+    mutate(tot = `<2` + `>=2`,
+           prop = `>=2` / tot,
+           str = paste0(`>=2`, "/", tot, " (",round(prop*100,0),"%)")) |>
+    select(species, any_drug_exposure, str, p) |>
+    pivot_wider(id_cols = c(species, p),
+    names_from = any_drug_exposure,
+values_from = str) |>
+    relocate(p, .after = everything()) |>
+  kbl(
+    booktabs = TRUE)
+ 
+
+```
+\pagebreak 
+
+
+
+## Modelling MIC with Gaussian process models.
+
+@fig-micmods shows the parameter outputs from the Gaussian process models. The
+key parameter is beta - this is the effect of antifungal exposure. There's no
+great change from the previous models; a reduction in MIC to
+fluconazole in glabrata and an increase in fluconazole MIC in albicans following
+azole exposure, but not a strong effect - of the order of the standard deviation
+of the MIC distribution. There is a clear within-participant temporal
+correlation in MIC (@fig-miccov).
+
+I think that the over all story from these models is that they do not identify a
+strong effect of drug exposure in shifting the MIC distribution on the isolates.
+
+```{r} 
+#| label: fig-micmods
+#| fig.cap: "Parameter values from MIC models with 95% CrI. (A) beta shows the effect of antimicrobial exposure on MIC [> 0, increases, < 0, decreases], alpha is the magnitude of the corelation between two samples within a participant, sigma_mic is the standard  deviation of the MIC distribution. (B) value of tau parameter (how long antimicrobial effect lasts for) (C) value of length_scale parameter that encodes the time that within-participant samples remain correlated for. In panel B and C the x axis variable is scaled time (helps to fit the model) - 1 unit there is 12.8 days"
+#| fig.height:  8
+#| fig.width: 8
+
+fitted_mic_models <- 
+  read_rds(here("data/fitted_stan_mic_gp_models.rda"))
+
+
+bind_rows(
+  lapply(
+    fitted_mic_models,
+    function(x) {
+      bind_cols(
+        species = x$species,
+        drug = x$drug,
+        bayesplot::mcmc_intervals_data(x$model_fit$draws(),
+          regex_pars = "sigma|beta|tau|length|alpha"
+        )
+      )
+    }
+  )
+) -> df
+
+p_a <-
+df |>
+  filter(!grepl("lp_|tau|length", parameter)) |>
+  ggplot(aes(parameter, m, ymin = ll, ymax = hh, color = species)) +
+  geom_point(position = position_dodge(0.5)) +
+  geom_errorbar(width = 0, position = position_dodge(0.5)) +
+  facet_wrap(~drug) +
+  coord_flip() +
+  theme_bw() +
+  scale_color_viridis_d() +
+  labs(y = "parameter value") +
+geom_hline(aes(yintercept = 0), linetype = "dashed") 
+
+p_b <-
+df |>
+  filter(grepl("tau", parameter)) |>
+  ggplot(aes(parameter, m, ymin = ll, ymax = hh, color = species)) +
+  geom_point(position = position_dodge(0.3)) +
+  geom_errorbar(width = 0, position = position_dodge(0.3)) +
+  facet_wrap(~drug) +
+  coord_flip()+
+  theme_bw() +
+  scale_color_viridis_d() +
+geom_hline(aes(yintercept = 0), linetype = "dashed") 
+
+p_c <-
+df |>
+  filter(grepl("length", parameter)) |>
+  ggplot(aes(parameter, m, ymin = ll, ymax = hh, color = species)) +
+  geom_point(position = position_dodge(0.3)) +
+  geom_errorbar(width = 0, position = position_dodge(0.3)) +
+  facet_wrap(~drug) +
+  coord_flip() +
+  theme_bw() +
+  scale_color_viridis_d() +
+geom_hline(aes(yintercept = 0), linetype = "dashed") 
+
+p_a / p_b / p_c + plot_layout(guides = "collect") + plot_annotation(tag_levels = "A")
+
+```
+
+```{r time-corr}
+#| label: fig-miccov
+#| fig.height: 5
+#| fig.width: 8
+#| fig-cap: "Posterior of the fitted covariance function between  two samples from the same participant. Each line is one draw from the posterior. Time here is scaled so one unit it 12.8 days"
+#| dev: 'jpeg'
+
+bind_rows(
+  lapply(
+    fitted_mic_models,
+    function(x) {
+      bind_cols(
+        species = x$species,
+        drug = x$drug,
+        x$model_fit$draws(format = "df")
+        )
+    }
+    )
+) -> df
+
+cross_join(
+  tibble(x = seq(0, 10, by = 0.1)),
+  df |>
+    select(c(species, drug, length_scale, alpha, .draw))
+) |>
+  mutate(f = alpha^2 * exp(-x^2 / (2 * length_scale^2))) |>
+  ggplot(aes(x, f, group = .draw, color = species)) +
+  geom_line(alpha = 0.01) +
+  facet_grid(drug ~ species) +
+  theme_bw() +
+  scale_color_viridis_d() +
+  theme(legend.position = "none") +
+  labs(x = "time")
+
+
+```
+
+# Conclusions
+
+I think that main message from these models is that there is not a strong
+population shift of MIC following drug exposure. It's possible that there are
+some interesting effects of azole exposure on fluconazole MIC but these could
+very likely be affected by confounding and they effects are not particularly
+strong when compared to the SD of the MIC distribution. But drug exposure is not
+driving a large population shift in MIC.
+
+However, the simpler analysis does suggest that (for azole in particular) drug
+exposure is associated with sporadic emergence of increase in MIC by our
+arbitrary threshold (at least log~2~ [fold MIC change] of 2). This is I guess
+consistent with stochastic emergence of resistance with sequential mutation or
+acquisition of genes - for which the sequencing may be a helpful next step.
+
+
+
+

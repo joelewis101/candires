@@ -382,6 +382,44 @@ if (scale) {
 
 }
 
+make_mic_gp_model_list_for_stan <- function(df, scale = TRUE) {
+  if (!scale) {
+    stop("not scaling is not yet implemented!")
+  }
+
+  df <-
+    df |>
+    group_by(psn) |>
+    mutate(t = as.numeric(
+      difftime(swb_date, min(swb_date), unit = "days")
+    ))
+
+  list_out <-
+    list(
+      n = nrow(df),
+      t = scale(df$t)[, 1],
+      n_participants = df |>
+        pull(psn) |>
+        unique() |>
+        length(),
+      N = df |>
+        group_by(psn) |>
+        summarise(n = n()) |>
+        pull(n),
+      n_covariates = 1,
+      t_e = df |>
+        mutate(days_since_drug_exposure = days_since_drug_exposure / sd(df$t)) |>
+        pull(days_since_drug_exposure) |>
+        matrix(ncol = 1),
+      y = df |>
+        pull(mic) |>
+        log()
+    )
+
+  list_out$y <- scale(list_out$y)[, 1]
+
+  return(list_out)
+}
 
 cat("\n")
 cat("---------------------------\n")

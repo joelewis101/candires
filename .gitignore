@@ -1,5 +1,6 @@
 data-raw/
 data/
+reports/
 *_files/
 .DS_store
 .Rhistory
@@ -12,4 +13,5 @@ archive/hmm
 archive/hmm2
 archive/hmm3
 archive/hmm_final
-
+gp_model
+*otter*
