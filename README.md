@@ -31,8 +31,14 @@ simulations, and generates analysis plots and tables as a pdf.
 The `archive/` folder contains previous iterations of models, scripts. These are
 by no means guaranteed to run.
 
-There is also a 3 state hmm model with support for censored states. This wasn't
+There are also:
+
+  * A 3 state hmm model with support for censored states. This wasn't
 included in the final analysis but the model file is `himm3_v2.stan` and can be
 fit with `fit_stan_3s_markov_mods.qmd`
+
+  * A MIC regression model that uses a more complex within-particiapnt
+  correlation `gp_model.stan` that is fit with `fit_stan_gp_mic_mods.qmd` and is
+  described in `candires_gp_model.qmd`
 
  
