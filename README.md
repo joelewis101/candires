@@ -20,15 +20,19 @@ models to the `data/` folder and generate a html with some model diagnostics.
 The file `sim_from_fitted_models.R` will load the fitted models, run some sims
 from the posterior, and save the results in `data/`
 
-- `mic_model_v2.stan` is a regression of MIC data with a time-varying effect of
+- `mic_model_v2_baseline.stan` is a regression of MIC data with a time-varying effect of
   antifungal exposure. See `candires_draft_final_analysis.qmd` for details. As
-above, the quarto file `fit_stan_mic_mods.qmd` will fit the models, save the
+above, the quarto file `fit_stan_mic_mods_baseline.qmd` will fit the models, save the
 output to `data/` and generate a html with some model diagnostics.
 
-The file `candires_draft_final_analysis.qmd` loads the saved models,
+The file `candires_draft_final.qmd` loads the saved models,
 simulations, and generates analysis plots and tables as a pdf.
 
 The `archive/` folder contains previous iterations of models, scripts. These are
 by no means guaranteed to run.
+
+There is also a 3 state hmm model with support for censored states. This wasn't
+included in the final analysis but the model file is `himm3_v2.stan` and can be
+fit with `fit_stan_3s_markov_mods.qmd`
 
  
