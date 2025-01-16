@@ -1,0 +1,269 @@
+---
+title: Fit candires threee state species presence/absence models in stan
+author: "Joe Lewis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: html
+execute:
+  echo: false
+  warning: false
+---
+
+# Intoduction
+
+Fit three state Markov models for candida presence/absence for the top four
+species with an effect of antifungal exposure. Plot model diagnostics and
+parameter values, and save the fitted models to `data/fitted_models_3s.rds`
+
+```{r setup}
+
+library(tidyverse)
+library(msm)
+library(here)
+library(ivs)
+library(bayesplot)
+
+source(here("load_mic_data.R"))
+source(here("modelling_helper_functions.R"))
+
+library(cmdstanr)
+
+mod_bin <- cmdstan_model(here("hmm3_v2.stan"))
+
+ast_lookup <- tibble(
+  species = c("glabrata", "glabrata", "glabrata"),
+  drug = c("micafungin", "fluconazole", "anadulafungin"),
+  r = c(0.03, 16, 0.06)
+)
+```
+
+```{r fit_mods}
+
+species <- c("albicans", "glabrata", "dubliniensis", "parapsilosis")
+drug <- c("Azole", "Echinocandin")
+
+fluconazole_breakpoints <-
+  c("albicans" = 4, "glabrata" = 16, "dubliniensis" = 4, "parapsilosis" = 4)
+
+anidula_breakpoints <-
+  c("albicans" = 0.02, "glabrata" = 0.06, "dubliniensis" = 0.03, "parapsilosis" = 4)
+
+list_out <- list()
+i <- 1
+
+for (current_species in species) {
+  for (current_drug in drug) {
+     print(i)
+   print(current_drug)
+    print(current_species)
+    breakpoint <- NA
+    if (current_drug == "Azole") {
+      current_mic_drug <- "fluconazole"
+      breakpoint <- fluconazole_breakpoints[current_species]
+    } else {
+      current_mic_drug <- "anidulafungin"
+      breakpoint <- anidula_breakpoints[current_species]
+    }
+    names(breakpoint) <- NULL
+    sublist_out <- list()
+    sublist_out$species <- current_species
+    sublist_out$drug <- current_drug
+    list_out[[i]] <- sublist_out
+    # print(current_species)
+    # print(current_drug)
+    # print(current_mic_drug)
+
+
+    generate_model_df(df_raw,
+      df_mics,
+      df_drug,
+      spec = current_species,
+      exposure_drug_class = current_drug,
+      mic_drug = current_mic_drug
+    ) |>
+      transmute(
+        pid = pid,
+        t = t,
+    covariate = covariate,
+        state = case_when(
+          sp_present == 0 ~ 0,
+          sp_present & mic <= breakpoint ~ 1,
+          sp_present & mic > breakpoint ~ 2,
+          sp_present & is.na(mic) ~ 3,
+          is.na(sp_present) ~ 4
+        )
+      ) |>
+      unique() |>
+      group_by(pid) |>
+      filter(n() > 1) |>
+      arrange(pid, t) |>
+      mutate(
+        t_end = lead(t),
+        state_end = lead(state)
+      ) |>
+      filter(!is.na(t_end)) |>
+      unique() |>
+      ungroup() |>
+    # a couple of repeated mics - removed
+      check_start_stop_modelling_df() ->
+    df_stan_3s
+
+    n_participants <- length(unique(df_stan_3s$pid))
+
+    n_obs_pairs_per_participant <- df_stan_3s |>
+      group_by(pid) |>
+      summarise(n = n()) |>
+      pull(n)
+
+    t_start <- df_stan_3s$t
+    t_end <- df_stan_3s$t_end
+    state_start <- df_stan_3s$state
+    state_end <- df_stan_3s$state_end
+    cov1 <- df_stan_3s$covariate
+
+    init_states <-
+      df_stan_3s |>
+      filter(t == 0) |>
+      ungroup() |>
+      count(state)
+
+
+    data_list <- list(
+      N = n_participants,
+      n = nrow(df_stan_3s),
+      n_obs = n_obs_pairs_per_participant,
+      t_start = t_start,
+      t_end = t_end,
+      state_start = state_start,
+      state_end = state_end,
+      covs = cov1,
+      debug = 0,
+      inits = init_states$n[1:3]
+    )
+
+   print( data_list)
+
+    # if (current_species == "dubliniensis" &
+    #   current_drug == "Azole") {
+    #       adapt_delta = 0.99
+    #       step_size = 0.001
+    #     } else {
+    #       adapt_delta = 0.8
+    #       step_size = 1
+    #     }
+adapt_delta <-0.8
+    step_size <- 1
+
+     sublist_out$model_fit <- mod_bin$sample(
+       data = data_list,
+       chains = 4,
+       iter_warmup = 1000,
+       iter_sampling = 1000,
+       refresh = 500,
+       adapt_delta = adapt_delta,
+       step_size = step_size,
+       # max_treedepth = 15,
+       parallel_chains = 4,
+       output_dir = here("data")
+     )
+
+    list_out[[i]] <- sublist_out
+    i <- i + 1
+  }
+}
+
+write_rds(list_out,
+  here("data/fitted_3s_stan_models.rda"),
+  compress = "gz"
+)
+```
+
+# Stan sample diagnostics
+
+```{r sampler-warnings}
+
+bind_rows(
+  lapply(
+    list_out,
+    function(x) {
+      bind_cols(
+        species = x$species,
+        drug = x$drug,
+        (x$model_fit$diagnostic_summary())
+      )
+    }
+  )
+) |>
+  pivot_longer(-c(species, drug)) |>
+  ggplot(aes(species, value, fill = drug)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  facet_grid(~name, scales = "free_x")
+```
+
+# Traceplots, ESS, R-hat
+
+```{r model-diagnostics}
+
+bind_rows(
+  lapply(
+    list_out,
+    function(x) {
+      bind_cols(
+        species = x$species,
+        drug = x$drug,
+        summary(x$model_fit$draws())
+      )
+    }
+  )
+) |>
+  select(
+    species,
+    drug,
+    variable,
+    rhat,
+    ess_bulk
+  ) |>
+  pivot_longer(-c(species, drug, variable)) |>
+  ggplot(aes(value, variable, fill = drug)) +
+  geom_col(position = "dodge") +
+  facet_grid(species ~ name, scales = "free")
+```
+
+```{r traceplots}
+
+for (i in 1:length(list_out)) {
+  print(
+    bayesplot::mcmc_trace(list_out[[i]]$model_fit$draws()) +
+      labs(title = paste0(
+        "Model: ",
+        list_out[[i]]$species,
+        ", ",
+        list_out[[i]]$drug
+      ))
+  )
+}
+```
+
+# Parameter values
+
+```{r plot_mods}
+
+bind_rows(
+  lapply(
+    list_out,
+    function(x) {
+      bind_cols(
+        species = x$species,
+        drug = x$drug,
+        bayesplot::mcmc_intervals_data(x$model_fit$draws())
+      )
+    }
+  )
+) |>
+  filter(!grepl("lp_", parameter)) |>
+  ggplot(aes(parameter, m, ymin = ll, ymax = hh, color = species)) +
+  geom_point(position = position_dodge(0.3)) +
+  geom_errorbar(width = 0, position = position_dodge(0.3)) +
+  facet_wrap(~drug) +
+  coord_flip()
+```
