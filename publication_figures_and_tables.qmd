@@ -1,0 +1,246 @@
+---
+title: Final candires publication figures and tables
+author: "Joe Lewis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: html
+execute:
+  echo: false
+  warning: false
+---
+
+
+```{r setup}
+
+library(tidyverse)
+library(here)
+library(cmdstanr)
+library(bayesplot)
+library(ggdist)
+library(patchwork)
+library(kableExtra)
+library(blantyreSepsis)
+
+species_cols <-
+  c(
+    "C. dubliniensis" = "#B2DF8A",
+    "C. parapsilosis" = "#FDBF6F",
+    "N. glabratus" = "#FF9F9B",
+    "C. albicans" = "#A6CEE3"
+  )
+
+```
+
+# Introduction
+
+The final *Candires* figures and tables from Joe's analysis for publication.
+
+## Markov model outputs and simulation
+
+
+```{r fug3}
+#| label: fig-fig3
+#| fig.width : 10
+#| fig.height: 8
+#| fig.cap: "Results of Markov models. A: Simulated Candida prevalence following exposure with antifungal; B-C: parameter values from fitted models"
+
+readRDS(here("data/fitted_stan_models.rda")) -> fitted_mods
+
+draws_df <-
+  bind_rows(
+    lapply(
+      fitted_mods,
+      function(x) {
+        x$model_fit$draws(format = "df") |>
+          select(-lp__) |>
+          pivot_longer(-c(.chain, .iteration, .draw)) |>
+          mutate(
+            species = x$species,
+            drug = x$drug,
+          )
+      }
+    )
+  )
+
+a <-
+draws_df |>
+  mutate(species = if_else(
+    grepl("glabrata", species), "N. glabratus", paste0("C. ", species))) |>
+ mutate(species = factor(species, levels = 
+c("C. albicans", "N. glabratus", "C. parapsilosis", "C. dubliniensis"))) |>
+  filter(grepl("beta", name)) |>
+  mutate(name = 
+      if_else(
+         name == "beta_01[1]", "log(HR<sub>01</sub>)", "log(HR<sub>10</sub>)")) |>
+  ggplot(aes(x = value, y = species, color = species, fill = species)) +
+  stat_halfeye(alpha = 0.3, interval_alpha = 1, normalize = "xy", .width =
+    c(0.95, 0.95)) +
+  facet_grid(drug ~ name, scales = "free") +
+  theme_bw() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "darkgrey", alpha = 0.7) +
+  coord_cartesian(xlim = c(-10, 5)) +
+  scale_fill_manual(values = species_cols) +
+  scale_color_manual(values = species_cols) +
+  guides(color = guide_legend(reverse = TRUE), fill = guide_legend(reverse = TRUE)) +
+    theme(strip.text = ggtext::element_markdown()) +
+    labs(fill = "", color = "", y = "Species", x = "Parameter value")+
+  theme(panel.spacing.x = unit(0.3, "cm"))
+
+b <-
+draws_df |>
+  mutate(species = if_else(
+    grepl("glabrata", species), "N. glabratus", paste0("C. ", species))) |>
+ mutate(species = factor(species, levels = 
+c("C. albicans", "N. glabratus", "C. parapsilosis", "C. dubliniensis"))) |>
+  filter(grepl("q", name)) |>
+  mutate(name = if_else(
+    name == "q[1]", "Uncolonised", "Colonised")) |>
+    mutate(name = factor(name, levels = c("Uncolonised", "Colonised"))) |>
+  ggplot(aes(x = 1/(value*log(2)), y = species, color = species, fill = species)) +
+  stat_halfeye(alpha = 0.3, interval_alpha = 1, normalize = "xy", .width =
+    c(0.95, 0.95), p_limits = c(0.01, 0.95)) +
+  facet_grid(drug ~ name, scales = "free") +
+  theme_bw() +
+  # coord_cartesian(xlim = c(0, 5)) +
+  scale_fill_manual(values = species_cols) +
+  scale_color_manual(values = species_cols) +
+  guides(color = guide_legend(reverse = TRUE), fill = guide_legend(reverse = TRUE)) +
+    theme(strip.text = ggtext::element_markdown()) +
+    labs(fill = "", color = "", x = "Mean time in state (days)", y = "Species") +
+  theme(panel.spacing.x = unit(0.3, "cm"))
+
+sims <- read_rds( "data/sims_list_summary_df.rda",) 
+
+c <-
+sims |>
+  as_tibble() |>
+  mutate(species = if_else(
+    grepl("glabrata", species), "N. glabratus", paste0("C. ", species))) |>
+ mutate(species = factor(species, levels = 
+c("C. albicans", "N. glabratus", "C. parapsilosis", "C. dubliniensis"))) |>
+  ggplot(aes(t, pr_1_med, ymin = lci, ymax = uci, fill = species, color =
+    species)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(alpha = 0.5, color = NA) +
+  facet_grid(fct_rev(species) ~ drug, scales = "free") +
+  xlim(c(0,30)) +
+theme_bw() +
+labs(y = "Simulated prevalence", x = "Time (days)") +
+theme(legend.position = "none") +
+  scale_fill_manual(values = species_cols) +
+  scale_color_manual(values = species_cols) 
+
+c / (a +b) + plot_layout(height = c(1.7,1),guides = "collect") +
+  plot_annotation(tag_levels = "A")
+
+ggsave("fig3.pdf", height = 8, width = 11)
+ggsave("fig3.svg", height = 8, width = 11)
+
+```
+
+
+```{r mod-tab1}
+#| label: tbl-mod-op
+#| tbl-cap: "Parameter values from fitted Markov models"
+
+bind_rows( 
+  lapply(
+    fitted_mods, 
+    function(x) bind_cols( 
+      species = x$species, 
+      drug = x$drug,
+      bayesplot::mcmc_intervals_data(x$model_fit$draws (),
+      prob_outer = 0.95)
+    )
+  )) |>
+  filter(grepl("beta", parameter)) |>
+  # mutate(parameter = case_when(
+  #   parameter == "beta_01[1]" ~ "HR(Colonisation)",
+  #   parameter == "beta_10[1]" ~ "HR(Decolonisation)",
+  # TRUE ~ parameter)) |>
+  mutate(across(matches("^m$|^ll$|^hh$"), ~ exp(.x))) |>
+  bind_rows(
+    bind_rows( 
+      lapply(
+        fitted_mods, 
+        function(x) bind_cols( 
+          species = x$species, 
+          drug = x$drug,
+          bayesplot::mcmc_intervals_data(x$model_fit$draws (),
+          prob_outer = 0.95)
+        )
+      )) |>
+      filter(grepl("q", parameter)) |>
+      # mutate(parameter = case_when(
+      #   parameter == "q[1]" ~ "Mean days in state (uncolonised)",
+      #   parameter == "q[2]" ~ "Mean days in state (colonised)",
+      # TRUE ~ parameter)) |>
+      mutate(across(matches("^m$|^ll$|^hh$"), ~ 1/(.x)))) |>
+  transmute(
+    species = species,
+    drug = drug,
+    parameter = parameter,
+    str = if_else(
+      grepl("q", parameter),
+      paste0(round(m,0), " (", round(hh, 0), "-", round(ll,0),")"),
+      paste0(round(m,2), " (", round(ll, 2), "-", round(hh,2),")")
+  )) |>
+   pivot_wider(id_cols = species, 
+    names_from = c(drug, parameter),
+    values_from = str) -> df_tab
+
+# df_tab[,c(1,2,4,3,5,6,8,7,9)] -> df_tab
+
+df_tab[,c(1,2,4,3,5)] |>
+  kbl(col.names = 
+  c("Species",
+  rep(c("Azole", "Echinocandin"),2)),
+  booktabs = TRUE) |>
+  add_header_above(
+    header = 
+      c(" " = 1,
+        "HR(0->1)" = 2,
+        "HR(1->0)" = 2))
+
+```
+## MIC models
+
+
+```{r}
+#| label: tbl-mic-mod-op
+#| tbl-cap: "Parameter values from fitted MIC models"
+
+model_fit <-
+  read_rds(
+    here("data/fitted_stan_mic_models_baseline_collate_species_fluconazole.rda")
+  )
+model_fit2 <-
+  read_rds(
+    here("data/fitted_stan_mic_models_baseline_collate_species_anidulo.rda")
+  )
+
+df <-
+  bind_rows(
+    mcmc_intervals_data(model_fit$draws(), prob_outer = 0.95) |>
+      mutate(model = "fluconazole"),
+    mcmc_intervals_data(model_fit2$draws(), prob_outer = 0.95) |>
+      mutate(model = "anidulafungin")
+  )
+
+df |>
+  filter(grepl("beta|tau", parameter)) |>
+  mutate(across(matches("^ll$|^l$|^m$|^h$|^hh$"), \(x) if_else(parameter == "beta[1]", exp(x), x))) |>
+  transmute(
+    parameter = parameter,
+    Drug = model,
+    str = paste0(sp_dc(m,2), " (95% CI ", sp_dc(ll,2), "-", sp_dc(hh,2),")")
+) |>
+  mutate(parameter = 
+    case_when(parameter == "beta[1]" ~ "Fold change in MIC",
+              parameter == "tau" ~ "Half life of effect (days)")
+) |>
+  pivot_wider(id_cols = Drug, names_from = c(parameter), values_from = str) |>
+  kbl(
+    booktabs = TRUE,
+    caption =  "Parameters from fitted model")
+
+```

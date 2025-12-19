@@ -1,0 +1,158 @@
+---
+title: Candires final MIC models - collate all species
+author: Joe Lewis
+date: today
+date-format: "D MMMM YYYY"
+format:
+  pdf:
+    mathspec: true
+    toc: true
+    number-sections: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+
+
+# Background
+
+This document describes what will (hopefully) be the final iteration of teh
+candires MIC models. Previous models have considered different candida species
+seperately. This runs into an issue because parameter values become uncertain as
+the data is sliced thinly.
+
+The approach here, then, is to build on Phoebe's analysis which looks at fold
+change in baseline MIC for all species combined, using a random effect model.
+
+# Specifying the model
+
+Formally, assume that there are $y_{i}$ log(MIC) observations,
+where $i = 1, 2 ... n$ indexes the observation. 
+
+We have $K$ participants; each participant can have 1 or more species identfied
+in total; for participant $j$ this is $s_{j}$ species.
+
+
+The log(MIC) values are assumed normally distributed, combining all species
+together.
+
+$$y_{i} \sim Normal(\mu_{i},\sigma_{MIC})$$
+
+Where
+
+$$\mu_{i} = \mu_{0} + t_{0}^{js} + \beta(t) + \gamma^{js}$$  
+
+$\gamma^{js}$ is a per-participant per-species random effect to account for
+non independence of samples,  $t_{0}^{js}$ is the baseline MIC for participant $j$ and species $s$, and $\mu_{0}$ is the population intercept. $\beta(t)$ is the time-dependent drug effect, defined by:
+
+$$ \beta(t) = \beta f(t) $$
+
+$f(t)$ takes the value 1 during antifungal exposure, 0 if a participant has had
+no antifungal exposure, and decays following cessation of antifungal exposure,
+given by $e^{-\frac{t}{\tau}}$; the speed of decay is therefore encoded by
+$\tau$
+
+The random effect is normally distributed
+
+$$ \gamma_{js} \sim Normal(0,\sigma)$$
+
+This model formulation essentially models *change from baseline MIC*,
+considering different species within a person to be independent. The principal
+parameter of interest is $\beta$, which encodes the effect of antimicrobial on
+baseline MIC value. $e^{\beta}$ can be interpreted as the **mean fold change of MIC
+from baseline** across all species, accounting for repeated measurements of
+individuals.
+
+We consier fluconazole MIC and azole expoure, and anidulafungin MIC and
+echinocandin exposure.
+
+# Model outputs
+
+Models were fit in Stan in a Bayesian framework, with Student t distribution
+(mean 0, sd 3, 3 degrees of freedom) for all parameters except $\tau$ which had
+the same distribution with standard deviation 30 days.
+
+```{r}
+#| fig.cap: "Model outputs; all are on log scale except tau which is on a scale of days"
+
+library(tidyverse)
+library(msm)
+library(here)
+library(ivs)
+library(bayesplot)
+library(patchwork)
+library(blantyreSepsis)
+library(kableExtra)
+library(readr)
+
+
+model_fit <-
+  read_rds(
+    here("data/fitted_stan_mic_models_baseline_collate_species_fluconazole.rda")
+  )
+model_fit2 <-
+  read_rds(
+    here("data/fitted_stan_mic_models_baseline_collate_species_anidulo.rda")
+  )
+
+df <-
+  bind_rows(
+    mcmc_intervals_data(model_fit$draws(), prob_outer = 0.95) |>
+      mutate(model = "fluconazole"),
+    mcmc_intervals_data(model_fit2$draws(), prob_outer = 0.95) |>
+      mutate(model = "anidulafungin")
+  )
+
+p_a <-
+  df |>
+  filter(grepl("sigma|mu0|beta", parameter)) |>
+  ggplot(aes(parameter, m, color = model)) +
+  geom_point(position = position_dodge(width = 0.3)) +
+  geom_errorbar(aes(ymin = ll, ymax = hh), width = 0, position = position_dodge(width = 0.3)) +
+  coord_flip() +
+  theme_bw() +
+  labs(y = "Parameter value")
+
+p_b <-
+df |>
+  filter(grepl("tau", parameter)) |>
+  ggplot(aes(parameter, m, color = model)) +
+  geom_point(position = position_dodge(width = 0.3)) +
+  geom_errorbar(aes(ymin = ll, ymax = hh), width = 0, position = position_dodge(width = 0.3)) +
+  coord_flip() +
+  theme_bw() +
+  labs(y = "Parameter value")
+
+p_a / p_b + plot_annotation(tag_level = "A") + plot_layout(heights = c(3,1))
+
+```
+
+```{r}
+
+df |>
+  filter(grepl("beta|tau", parameter)) |>
+  mutate(across(matches("^ll$|^l$|^m$|^h$|^hh$"), \(x) if_else(parameter == "beta[1]", exp(x), x))) |>
+  transmute(
+    parameter = parameter,
+    Drug = model,
+    str = paste0(sp_dc(m,2), " (95% CI ", sp_dc(ll,2), "-", sp_dc(hh,2),")")
+) |>
+  mutate(parameter = 
+    case_when(parameter == "beta[1]" ~ "Fold change in MIC",
+              parameter == "tau" ~ "Half life of effect (days)")
+) |>
+  pivot_wider(id_cols = Drug, names_from = c(parameter), values_from = str) |>
+  kbl(
+    booktabs = TRUE,
+    caption =  "Parameters from fitted model")
+
+```
+
+# Conclusions
+
+This analyis (I think) builds on Pheobe's analysis so hopefully flows well from
+that plot in the paper. I think that it can be interpreted as supporting teh
+hypothesis that there is an increase in MIC to fluconazole following azole
+exposure (mean 1.2-fold). 

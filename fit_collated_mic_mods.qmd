@@ -1,0 +1,268 @@
+---
+title: Fit collated mic models (all species included)
+author: "Joe Lewis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format: html
+execute:
+  echo: false
+  warning: false
+---
+
+# Intoduction
+
+Fit mixed effect models for candida mic for the top four
+species with an effect of antifungal exposure. Plot model diagnostics and
+parameter values, and save the fitted models to `data/fitted_mic_models_baseline.rds`
+
+```{r setup}
+
+library(tidyverse)
+library(msm)
+library(here)
+library(ivs)
+library(bayesplot)
+library(patchwork)
+
+source(here("load_mic_data.R"))
+source(here("modelling_helper_functions.R"))
+
+library(cmdstanr)
+
+mic_mod <- cmdstan_model(here("mic_model_v2_baseline.stan"))
+```
+
+```{r fit_mods}
+
+# fit fluconazole mods
+
+# df_mics_fluc <- 
+  df_mics |>
+  # mutate(psn = paste0(psn, species)) |>
+  filter(drug == "fluconazole") |>
+   left_join(
+      df_drug |>
+        select(-date_enrol) |>
+        filter(antifung_class == "Azole"), !is.na(date_enrol) |>
+        mutate(range = iv(date_antifung_start, date_antifung_end)) |>
+        reframe(
+          range = iv_groups(range, abutting = TRUE),
+          .by = c(psn, date_enrol, antifung_class)
+        ),
+      by = join_by(psn, closest(swb_date >= date_antifung_start))
+    ) ->
+  df_out
+
+
+df_out <-
+df_out |>
+      ungroup() |>
+      mutate(
+        days_since_drug_exposure =
+          case_when(
+            is.na(date_antifung_start) ~ -1,
+            date_antifung_end >= swb_date & date_antifung_start <= swb_date ~ 0,
+            date_antifung_end < swb_date ~ as.numeric(
+              difftime(swb_date, date_antifung_end, units = "days")
+            )
+          )) 
+
+df_out <-
+  df_out |>
+    mutate(psn = paste0(psn, species))
+
+data_df <-
+  df_out |>
+  group_by(psn) |>
+    arrange(psn, swb_date) |>
+    mutate(baseline_mic = first(mic))
+
+data_list <-
+    data_list <-
+      list(
+        n = nrow(data_df),
+        n_participants = data_df |>
+          pull(psn) |>
+          unique() |>
+          length(),
+        pid = data_df |>
+          left_join(
+            data_df |>
+              select(psn) |>
+              unique() |>
+              ungroup() |>
+              mutate(pid = seq_along(1:n()))
+          ) |>
+          pull(pid),
+        t_e = data_df |>
+          pull(days_since_drug_exposure),
+        y = data_df |>
+          pull(mic) |>
+          log(),
+        y_0 = data_df |>
+          pull(baseline_mic) |>
+          log()
+      )
+
+
+
+      adapt_delta <- 0.8
+      step_size <- 1
+      max_treedepth <- 10
+
+    model_fit <- mic_mod$sample(
+      data = data_list,
+      chains = 4,
+      iter_warmup = 1000,
+      iter_sampling = 1000,
+      refresh = 500,
+      adapt_delta = adapt_delta,
+      step_size = step_size,
+      max_treedepth = max_treedepth,
+      parallel_chains = 4,
+      output_dir = here("data")
+    )
+
+
+write_rds(model_fit,
+  here("data/fitted_stan_mic_models_baseline_collate_species_fluconazole.rda"),
+  compress = "gz"
+)
+
+
+
+# df_mics_fluc <- 
+  df_mics |>
+  # mutate(psn = paste0(psn, species)) |>
+  filter(drug == "anidulafungin") |>
+   left_join(
+      df_drug |>
+        select(-date_enrol) |>
+        filter(antifung_class == "Echinocandin"), !is.na(date_enrol) |>
+        mutate(range = iv(date_antifung_start, date_antifung_end)) |>
+        reframe(
+          range = iv_groups(range, abutting = TRUE),
+          .by = c(psn, date_enrol, antifung_class)
+        ),
+      by = join_by(psn, closest(swb_date >= date_antifung_start))
+    ) ->
+  df_out
+
+
+df_out <-
+df_out |>
+      ungroup() |>
+      mutate(
+        days_since_drug_exposure =
+          case_when(
+            is.na(date_antifung_start) ~ -1,
+            date_antifung_end >= swb_date & date_antifung_start <= swb_date ~ 0,
+            date_antifung_end < swb_date ~ as.numeric(
+              difftime(swb_date, date_antifung_end, units = "days")
+            )
+          )) 
+
+df_out <-
+  df_out |>
+    mutate(psn = paste0(psn, species))
+
+data_df <-
+  df_out |>
+  group_by(psn) |>
+    arrange(psn, swb_date) |>
+    mutate(baseline_mic = first(mic))
+
+data_list <-
+    data_list <-
+      list(
+        n = nrow(data_df),
+        n_participants = data_df |>
+          pull(psn) |>
+          unique() |>
+          length(),
+        pid = data_df |>
+          left_join(
+            data_df |>
+              select(psn) |>
+              unique() |>
+              ungroup() |>
+              mutate(pid = seq_along(1:n()))
+          ) |>
+          pull(pid),
+        t_e = data_df |>
+          pull(days_since_drug_exposure),
+        y = data_df |>
+          pull(mic) |>
+          log(),
+        y_0 = data_df |>
+          pull(baseline_mic) |>
+          log()
+      )
+
+
+
+      adapt_delta <- 0.8
+      step_size <- 1
+      max_treedepth <- 10
+
+    model_fit2 <- mic_mod$sample(
+      data = data_list,
+      chains = 4,
+      iter_warmup = 1000,
+      iter_sampling = 1000,
+      refresh = 500,
+      adapt_delta = adapt_delta,
+      step_size = step_size,
+      max_treedepth = max_treedepth,
+      parallel_chains = 4,
+      output_dir = here("data")
+    )
+
+
+write_rds(model_fit2,
+  here("data/fitted_stan_mic_models_baseline_collate_species_anidulo.rda"),
+  compress = "gz"
+)
+
+
+```
+
+# Traceplots, ESS, R-hat
+
+```{r model-diagnostics}
+
+
+
+bind_rows(
+  summary(model_fit$draws()) |>
+    mutate(model = "fluconazole"),
+  summary(model_fit2$draws()) |>
+    mutate(model = "anidulafungin")
+  ) |>
+  select(
+  model,
+    variable,
+    rhat,
+    ess_bulk
+  ) |>
+  filter(grepl("mu0|sigma|tau|beta", variable)) |>
+  pivot_longer(-c(model, variable)) |>
+  ggplot(aes(value, variable, fill = model)) +
+  geom_col(position = "dodge") +
+  facet_grid( ~ name, scales = "free")
+```
+
+```{r traceplots}
+
+
+print(bayesplot::mcmc_trace(model_fit$draws(),
+      regex_pars = "mu0|sigma|tau|beta"
+    )) +
+  labs(title = "Fluconazole")
+
+print(bayesplot::mcmc_trace(model_fit2$draws(),
+      regex_pars = "mu0|sigma|tau|beta"
+    )) +
+  labs(title = "Anidulafungin")
+
+```
+

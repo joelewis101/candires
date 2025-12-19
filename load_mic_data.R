@@ -3,13 +3,24 @@ require(tidyverse)
 require(here)
 # split off micr measurements and drugs in to seperate dataframes 
 
-path <- here("data-raw/iso_afg_clean.csv")
+# path <- here("data-raw/iso_afg_clean.csv")
 
-df_raw <- read_csv(path)
+path <- here("data-raw/long_df_mic_031025.csv")
+
+df_raw <- read_csv(path) |>
+  mutate(
+    date_antifung_start = if_else(
+      psn == 2007 & antifung_class == "Azole",
+      as.Date("2022-02-16"),
+      date_antifung_start
+    )
+  )
+# correct missing antifungal start date 
+# the correct date is copied lomg_mic_df_160124
 
 df_mics <- 
 df_raw |>
-  select(c(psn, date_enrol, isol_date, isol_species, starts_with("mic"))) |>
+  select(c(psn, date_enrol, swb_date, isol_species, starts_with("mic"))) |>
   # select(-mic_tested) |>
   unique() |>
   pivot_longer(
@@ -19,8 +30,7 @@ df_raw |>
     values_to = "mic",
     values_drop_na = TRUE
   ) |>
-  rename(species = isol_species,
-  swb_date = isol_date) 
+  rename(species = isol_species)
 
 df_drug <-
   df_raw |>
@@ -36,9 +46,9 @@ df_drug <-
   unique() |>
   mutate(date_antifung_start = date(date_antifung_start))
 
-df_raw <-
-df_raw |>
-  rename(swb_date = isol_date)
+# df_raw <-
+# df_raw |>
+#   rename(swb_date = isol_date)
 
 cat("\n")
 cat("---------------------------\n")

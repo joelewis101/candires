@@ -1,4 +1,5 @@
 data-raw/
+jan25analysis/
 data/
 reports/
 *_files/
@@ -15,3 +16,5 @@ archive/hmm3
 archive/hmm_final
 gp_model
 *otter*
+*.svg
+manuscript/

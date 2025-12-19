@@ -1,0 +1,1064 @@
+---
+title: First look at candires data
+author: "Joe Lewis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+ pdf: 
+  toc: true
+  number-sections: true
+execute:
+  echo: false
+  warning: false
+---
+
+```{r setup}
+#| echo: false
+#| warning: false
+#| message: false
+#| include: false
+
+library(tidyverse)
+library(here)
+library(msm)
+library(patchwork)
+library(viridis)
+library(janitor)
+
+## HELPER FUNCTIONS TO MAKE MSM DATAFRAMES ---------------------------------
+
+
+# function to change a start-stop df to a long df
+
+start_stop_to_long <- function(df, classvector) {
+  if (length(unique(df$psn)) > 1) {
+    stop("ERROR: multiple pids in df passed to start_stop_to_long")
+  }
+  min_t <- min(df$t_start)
+  if (min_t > 0) {
+    min_t <- 0
+  }
+  max_t <- max(df$t_end) + 1
+  # set up df
+  df_out <- data.frame(
+    psn = unique(df$psn),
+    t = rep(min_t:max_t, length(classvector)),
+    classes = rep(classvector, each = length(min_t:max_t))
+  ) |>
+    pivot_wider(
+      id_cols = c(psn, t),
+      names_from = classes,
+      values_from = classes,
+      values_fn = function(x) 0
+    )
+  # populate covariates
+  for (class in unique(df$class)) {
+    df_temp <- df[df$class == class, ]
+    for (row_n in 1:nrow(df_temp)) {
+      df_out[
+        df_out$t >= df_temp$t_start[row_n] & df_out$t <= df_temp$t_end[row_n],
+        class
+      ] <- 1
+    }
+  }
+  return(df_out)
+}
+# code to test function
+
+# psn_test <- unique(df_rx$psn)[sample(length(unique(df_rx$psn)),1)]
+# df_rx |>
+#   filter(psn == psn_test) |>
+#   select(psn,class,t_start, t_end)-> df_test
+# df_test
+# start_stop_to_long(df_test,classvector) |> as.data.frame()
+
+
+# function to strip repeated rows of covariates in a long df
+# assumes that pid var is called psn
+# and the state var is state
+# strategy - remove rows 
+
+remove_repeated_rows <- function(df, cov_start_col = 3,
+                                 cov_end_col = ncol(df) - 1) {
+  df$rowsum <- apply(df[, cov_start_col:cov_end_col], 1, sum)
+  df$lagrowsum <- lag(df$rowsum)
+  df[is.na(df$lagrowsum) |
+    (!is.na(df$lagrowsum) & df$lagrowsum != df$rowsum) |
+    !is.na(df$state), ] -> df
+  select(df, -c(rowsum, lagrowsum)) -> df
+  return(df)
+}
+
+## ----------------------------------------------------------------------
+
+# load and clean data
+
+df <- read_csv(here("data-raw/candires_wide_df_2.csv")) |>
+  janitor::clean_names() |>
+  select(-x1)
+
+# check for duplicated IDs
+
+df |>
+  group_by(psn) |>
+  summarise(n = n()) |>
+  filter(n > 1)
+
+# make long df
+
+df |>
+  select(matches("^x|^psn$")) |>
+  pivot_longer(-psn, names_to = "t", values_to = "species") |>
+  mutate(t = gsub("x", "", t)) |>
+  filter(!is.na(species)) |>
+  separate_longer_delim(species, ", ") |>
+  mutate(species = tolower(trimws(gsub("\\(.*\\)", "", species)))) |>
+  mutate(
+    species = gsub("\\.", "", species),
+    species = gsub(" ", "_", species)
+  ) -> df_species
+
+# any duplicated pid-time_org rows?
+
+df_species |>
+  group_by(psn, t, species) |>
+  summarise(n = n()) |>
+  filter(n > 1) |>
+  as.data.frame()
+
+# yes - n the original wide df these have two of the same org - we can
+# safely filter
+
+df_species |>
+  unique() -> df_species
+
+# check that there are no not_detected at the same time as a detected
+
+df_species |>
+  group_by(psn, t) |>
+  summarise(
+    not_detected = any(species == "not_detected"),
+    detected = any(species != "not_detected")
+  ) |>
+  filter(detected & not_detected)
+
+# yes - one - looks like an error in the orginal df?
+# get rid
+
+df_species |>
+  filter(!(psn == 4001 & t == 0 & species == "not_detected")) ->
+df_species
+
+
+df_species |>
+  mutate(t = as.numeric(t)) |>
+  group_by(psn) |>
+  summarise(max_t = max(t, na.rm = TRUE)) |>
+  summarise(
+    median_fu = median(max_t),
+    lq_fu = quantile(max_t, 0.25),
+    uq_fu = quantile(max_t, 0.75)
+  ) -> fu_time
+```
+
+
+# Outline of document
+
+This document contains a brief overview of the *candires* data I've been sent
+and a first pass at fitting some simple two state Markov models linking
+antifungal exposure to colonisation. 
+
+# Descriptions of candires data
+
+This file `candires_wide_df_2.csv` contains data on `r
+length(unique(df_species$psn))` participants with presence/absence of
+different candida species at multiple time points per individual. There are a
+total of `r df_species |> select(psn,t) |> unique() |> nrow()` samples with a
+median (IQR) follow up time of `r  with(fu_time, paste0(median_fu, "
+(",lq_fu,"-",uq_fu,")"))` days.
+
+## Describing distribution of species vs time
+
+Plot some simple descriptions:  
+
+* distribution of samples in time
+* number of samples per participant
+* dotplots of colonisation vs not for individuals
+* colonisation prevalence by species
+
+
+```{r}
+#| fig.cap: "Number of samples per time point across all participants (top) and number of samples per participant (bottom)"
+#| fig.height: 4
+#| fig.width: 5
+#| fig.pos: "H"
+
+
+# prevalence vs time
+# make wide df and fill NAs with 0s
+# assumption - if a species is not seen at a time point then it is absent
+
+# first - how many samples
+
+df_species |>
+  select(psn, t) |>
+  unique() |>
+  mutate(t = as.numeric(t)) |>
+  ggplot(aes(t)) +
+  geom_bar() +
+  labs(title = "Distribution of samples in time") -> a
+
+
+# how many samples per participant?
+
+
+df_species |>
+  select(psn, t) |>
+  unique() |>
+  mutate(t = as.numeric(t)) |>
+  group_by(psn) |>
+  tally() |>
+  ggplot(aes(n)) +
+  geom_bar() +
+  labs(title = "Number of samples per participant") -> b
+
+a / b
+
+```
+
+
+```{r}
+#| fig.cap: "Distribution of species"
+#| fig.height: 3
+#| fig.width: 5
+#| fig.pos: "H"
+
+# simple distribution
+
+df_species |>
+  ggplot(aes(fct_infreq(species))) +
+  geom_bar() +
+  coord_flip()
+
+```
+
+```{r}
+#| fig.cap: "Time series of individuals; each row is a participant and each dot a sample. Color represents presence or absence of any candida spp."
+#| fig.height: 12
+#| fig.width: 7
+#| fig.pos: "H"
+
+# plot sampling times
+
+df_species |>
+  group_by(psn, t) |>
+  mutate(
+    psn = as.character(psn),
+    t = as.numeric(t)
+  ) |>
+  summarise(
+    result =
+      if_else(any(species != "not_detected"),
+        "candida spp.",
+        "no candida spp."
+      )
+  ) |>
+  group_by(psn) |>
+  mutate(n_samples = n()) |>
+  ggplot(aes(t, fct_reorder(psn, n_samples), color = result)) +
+  geom_point(size = 1) +
+  ggtitle("Most participants are either colonised or non-colonised?") +
+  theme(legend.position = "bottom")
+
+```
+
+```{r}
+#| echo: true
+#| include: false
+
+# how many state transitions from colonised to non-colonised?
+
+df_species |>
+  group_by(psn, t) |>
+  mutate(
+    psn = as.character(psn),
+    t = as.numeric(t)
+  ) |>
+  summarise(
+    result =
+      if_else(any(species != "not_detected"),
+        "candida spp.",
+        "no candida spp."
+      )
+  ) |>
+  group_by(psn) |>
+  mutate(state_transition = result != lag(result)) |>
+  ungroup() |>
+  filter(!is.na(state_transition)) |>
+  count(state_transition)
+# proportion of species
+
+```
+
+```{r}
+#| fig.cap: "Colonisation prevalence vs time: four most prevalent species. A: number of samples in dataset; B: proportion of positive samples (blue) at each time point; C: smoothed colonisation prevalence"
+#| fig.width: 7
+#| fig.height: 10
+#| fig.pos: "H"
+
+
+
+df_species |>
+  pivot_wider(
+    id_cols = c(psn, t),
+    names_from = species,
+    values_from = species,
+    values_fn = length,
+    values_fill = 0
+  ) |>
+  select(-not_detected) |>
+  pivot_longer(-c(psn, t)) |>
+  mutate(
+    t = as.numeric(t),
+    value = as.character(value)
+  ) |>
+  filter(name %in% c("albicans")) |>
+  ggplot(aes(t)) +
+  geom_bar() -> a
+
+df_species |>
+  pivot_wider(
+    id_cols = c(psn, t),
+    names_from = species,
+    values_from = species,
+    values_fn = length,
+    values_fill = 0
+  ) |>
+  select(-not_detected) |>
+  pivot_longer(-c(psn, t)) |>
+  mutate(
+    t = as.numeric(t),
+    value = as.character(value)
+  ) |>
+  filter(name %in% c("albicans", "dubliniensis", "glabrata", "parapsilosis")) |>
+  ggplot(aes(t, group = value, fill = value, color = value)) +
+  geom_bar(position = "fill") +
+  facet_wrap(~name, ncol = 1, scales = "free_y") -> b
+
+
+df_species |>
+  pivot_wider(
+    id_cols = c(psn, t),
+    names_from = species,
+    values_from = species,
+    values_fn = length,
+    values_fill = 0
+  ) |>
+  select(-not_detected) |>
+  pivot_longer(-c(psn, t)) |>
+  mutate(t = as.numeric(t)) |>
+  filter(name %in% c("albicans", "dubliniensis", "glabrata", "parapsilosis")) |>
+  ggplot(aes(t, value)) +
+  geom_smooth(se = TRUE) +
+  facet_wrap(~name, ncol = 1, scales = "free_y") +
+  coord_cartesian(ylim = c(0, 0.6)) -> c
+
+(a / b / c) + plot_annotation(tag_levels = "A") +
+  plot_layout(heights = c(0.2, 1, 1))
+```
+
+```{r}
+#| fig.cap: "Smoothed colonisation prevalence vs time: other species"
+#| fig.width: 7
+#| fig.height: 6
+#| fig.pos: "H"
+
+df_species |>
+  pivot_wider(
+    id_cols = c(psn, t),
+    names_from = species,
+    values_from = species,
+    values_fn = length,
+    values_fill = 0
+  ) |>
+  select(-not_detected) |>
+  pivot_longer(-c(psn, t)) |>
+  mutate(t = as.numeric(t)) |>
+  filter(!name %in%
+    c("albicans", "dubliniensis", "glabrata", "parapsilosis")) |>
+  ggplot(aes(t, value)) +
+  geom_smooth(se = TRUE) +
+  facet_wrap(~name, ncol = 2, scales = "free_y") +
+  coord_cartesian(ylim = c(0, 0.05))
+
+```
+
+
+
+```{r}
+#| include: false
+
+## fit simple (no covariate) model to albicans
+
+df_species |>
+  pivot_wider(
+    id_cols = c(psn, t),
+    names_from = species,
+    values_from = species,
+    values_fn = length,
+    values_fill = 0
+  ) |>
+  select(psn, t, albicans) |>
+  mutate(
+    albicans = albicans + 1,
+    t = as.numeric(t)
+  ) |>
+  arrange(psn, t) -> df_albicans
+
+Q <- rbind(c(0, 1), c(1, 0))
+
+alb_msm <- msm(albicans ~ t, subject = psn, data = df_albicans, qmatrix = Q)
+
+# ok this seems to fit
+
+# now add covariates
+
+```
+
+\pagebreak  
+
+## Describing antifungal treatments
+
+
+
+```{r}
+#| include: false
+
+# load and clean treatment
+
+# first load rx data, get into a long start/stop format and switch)
+# dates to days since enrolment
+
+df_rx <- read_csv("data-raw/candires_wide_df_2.csv") |>
+  select(matches("psn|antifung|date")) |>
+  rename_with(~ gsub("^antifung_|^date_antifung_", "", .x)) |>
+  rename_with(~ gsub("(?<=g)_", "", .x, perl = T)) |>
+  pivot_longer(-c(psn, date_enrol),
+    names_to = c(".value", "group"),
+    names_sep = "_",
+    values_drop_na = TRUE
+  ) |>
+  select(-group) |>
+  mutate(
+    t_start = as.numeric(difftime(start, date_enrol, units = "days")),
+    t_end = as.numeric(difftime(end, date_enrol, units = "days"))
+  )
+
+# Are there psns in df_species that are not in df_rx?
+
+df_species |>
+  anti_join(df_rx) |>
+  summarise(n = length(unique(psn)))
+
+# yes
+
+# and vice-versa?
+
+df_rx |>
+  anti_join(df_species) |>
+  summarise(n = length(unique(psn)))
+
+# yes
+# presumably these are the ones who got no rx?
+
+# now get into the format needed for msm to model with covariates
+
+# are there any overlapping ranges for psn-class pairs?
+
+df_rx |>
+  group_by(psn, class) |>
+  arrange(psn, class, t_start) |>
+  mutate(prev_end = lag(t_end, n = 1)) |>
+  filter(prev_end >= t_start & prev_end <= t_start)
+
+
+# just two - but they don't really overlap (ie start = stop)
+# so no need to filter
+
+df_rx |>
+  group_by(psn, class) |>
+  arrange(psn, class, t_start) |>
+  filter(psn %in% c(2017, 3007))
+
+df_rx |>
+  filter(psn == 2017) |>
+  select(psn, class, t_start, t_end) -> df_test
+
+```
+
+
+```{r}
+#| fig.cap: "Distribution of administered antifungals"
+#| fig.height: 2
+#| fig.width: 5
+#| fig.pos: "H"
+#| label: "antifungdist"
+
+df_rx |>
+  select(psn, class) |>
+  unique() |>
+  ggplot(aes((fct_infreq(class)))) +
+  geom_bar() +
+  coord_flip()
+
+```
+
+
+`r length(unique(df_rx$psn))` participants recieved any antifungal therapy -
+distribution of agents shown above.
+
+```{r}
+#| fig.cap: "Timeline of antifungal treatments per individual; each row is an individual with receipt of antifungal indicated by presence of a coloured line"
+#| fig.width: 7
+#| fig.height: 10
+#| fig.pos: "H"
+
+
+# plot treatments
+
+df_rx |>
+  select(psn, class, t_start, t_end) |>
+  pivot_longer(-c(psn, class)) |>
+  mutate(psn = as.character(psn)) |>
+  ggplot(aes(value, psn, color = class)) +
+  geom_line(position = ggstance::position_dodgev(height = 0.5))
+
+```
+
+
+\pagebreak  
+
+
+
+# Building some simple models linking antifungal exposure to colonisation with *msm* in R
+
+## Motivation and methods
+
+Here we'll build some simple two state models Candida colonisation, using the
+*msm* package in r. These models will use a binary outcome of
+presence/absence and will consider albicans or glabrata presence as outcome.
+These are chosen just an the two most prevalent species.
+
+These models assume:
+
+* Participants can be in either a colonised or non-colonised state
+* They move between these states with a fixed instantaneous rate
+* This rate can be influenced by exposure to antifungals, which act in to
+  multiply the transition rate by a fixed amount whilst antifungal exposure is
+  ongoing; this can be expressed as a hazard ratio
+* For now, fit univariable models i.e. one covariate only - these models can
+  get quite data hungry in terms of being able to identify parameters so we
+  would need to carefully think about what to include.
+
+I hope these can serve as the starting point for a discussion. I'll plot the
+parameter values and the mean time-in-state (i.e. how long someone would be
+predicted to remain colonised or non-colonised for) and, because these models
+can be hard to interpret, some simple simulations of the effect of different
+antifungal exposures on Candida
+
+You can see from the parameter uncertainty intervals that some of
+the models (all models considering amphoteracin and the glabrata-azole models)
+have extremely wide confidence intervals. This is because there is just not
+enough information in the dataset to estimate these effects. Therefore, when
+building some simulations I'll consider the albicans-azole,
+albicans-echinocandin and glabrata-echionocandin models only, because the
+effect of these agents has been reasonably estimated.
+
+## Results and conclusions
+
+```{r}
+#| include: false
+
+# now make a covariate df, and fit models
+
+df_rx |>
+  select(psn, class, t_start, t_end) |>
+  pivot_longer(-c(psn, class)) |>
+  mutate(name = gsub("t_", "", name)) |>
+  mutate(class = tolower(gsub(" ", "_", class))) |>
+  pull(class) |>
+  unique() -> classvector
+
+classvector <- unique(df_rx$class)
+
+
+
+df_rx |>
+  select(psn, class, t_start, t_end) |>
+  mutate(t_end = if_else(is.na(t_end), 100, t_end)) |>
+  group_by(psn) %>%
+  do(start_stop_to_long(., classvector)) %>%
+  janitor::clean_names() -> df_covs
+
+full_join(df_covs, df_albicans, by = c("psn", "t")) -> df_albicans_covs
+df_albicans_covs |>
+  rename(state = albicans) -> df_albicans_covs
+
+df_albicans_covs |>
+  mutate(across(
+    matches("echino|nystat|ampho|azo|oth|fluc"),
+    function(x) if_else(is.na(x), 0, x)
+  )) -> df_albicans_covs
+
+
+
+remove_repeated_rows(select(
+  df_albicans_covs, psn, t,
+  echinocandin, azole, amphotericin_b, state
+)) ->
+df_mod
+
+
+df_mod %>%
+  arrange(psn, t) -> df_mod
+
+
+# ok fit models
+
+
+alb_msm_azole <- msm(state ~ t,
+  subject = psn, data = df_mod,
+  qmatrix = Q,
+  covariates = ~azole
+)
+
+
+alb_msm_echinocandin <- msm(state ~ t,
+  subject = psn, data = df_mod,
+  qmatrix = Q,
+  covariates = ~echinocandin
+)
+
+
+alb_msm_ampho <- msm(state ~ t,
+  subject = psn, data = df_mod,
+  qmatrix = Q,
+  covariates = ~amphotericin_b
+)
+# alb_msm_azole
+# alb_msm_echinocandin
+# alb_msm_ampho
+
+# glabrata
+
+df_species |>
+  pivot_wider(
+    id_cols = c(psn, t),
+    names_from = species,
+    values_from = species,
+    values_fn = length,
+    values_fill = 0
+  ) |>
+  select(psn, t, glabrata) |>
+  mutate(
+    glabrata = glabrata + 1,
+    t = as.numeric(t)
+  ) |>
+  arrange(psn, t) -> df_glabrata
+
+
+full_join(df_covs, df_glabrata, by = c("psn", "t")) -> df_glabrata_covs
+
+df_glabrata_covs |>
+  rename(state = glabrata) -> df_glabrata_covs
+
+df_glabrata_covs |>
+  mutate(across(matches("echino|nystat|ampho|azo|oth|fluc"),
+                function(x) if_else(is.na(x), 0, x))) -> df_glabrata_covs
+
+remove_repeated_rows(select(
+  df_glabrata_covs, psn, t,
+  echinocandin, azole, amphotericin_b, state
+)) ->
+df_mod
+
+df_mod %>%
+  arrange(psn, t) -> df_mod
+
+glab_msm_azole <- msm(state ~ t,
+  subject = psn, data = df_mod,
+  qmatrix = Q,
+  covariates = ~azole
+)
+
+
+glab_msm_echinocandin <- msm(state ~ t,
+  subject = psn, data = df_mod,
+  qmatrix = Q,
+  covariates = ~echinocandin
+)
+
+
+glab_msm_ampho <- msm(state ~ t,
+  subject = psn, data = df_mod,
+  qmatrix = Q,
+  covariates = ~amphotericin_b
+)
+
+# glab_msm_azole
+# glab_msm_echinocandin
+# glab_msm_ampho
+```
+
+```{r}
+#| fig.width: 6
+#| fig.height: 7
+#| fig.cap: "Parameter values from fitted models. State 1 = uncolonised, State 2 = colonised"
+
+
+# pull parameter estimates out of models and plot
+
+# msm.form.qoutput gives a weird nested structure
+# this sorts it out
+
+pull_params_out_of_msm_model <- function(mod, covariates = 0) {
+  qoutput <- msm::msm.form.qoutput(mod, covariates = covariates)
+  ncovs <- ncol(qoutput) - 4
+  dfout <- qoutput[1:3]
+  for (i in 1:ncovs) {
+    dfcovs <- as.data.frame(qoutput[, 4 + i])
+    names(dfcovs) <- paste0(names(qoutput[4 + i]), ".", names(dfcovs))
+    dfout <- dplyr::bind_cols(dfout, dfcovs)
+  }
+  return(dfout)
+}
+
+# ok get the params
+
+pmap(
+  list(
+    orgs = list(
+      "albicans", "albicans", "albicans",
+      "glabrata", "glabrata", "glabrata"
+    ),
+    model = list(
+      "azole", "echinocandin", "amphoteracin",
+      "azole", "echinocandin", "amphoteracin"
+    ),
+    msm_object = list(
+      alb_msm_azole, alb_msm_echinocandin, alb_msm_ampho,
+      glab_msm_azole, glab_msm_echinocandin, glab_msm_ampho
+    )
+  ),
+  \(orgs, model, msm_object) pull_params_out_of_msm_model(msm_object) |>
+    mutate(
+      species = orgs,
+      model = model
+    ) |>
+    rownames_to_column("transition") |>
+    filter(transition %in% c(
+      "State 1 - State 2",
+      "State 2 - State 1"
+    )) |>
+    select(!contains("Fixed")) |>
+    pivot_longer(-c(species, model, transition),
+      names_to = c("parameter", ".value"),
+      names_sep = "\\."
+    )
+) |> bind_rows() -> all_mod_params
+
+all_mod_params |>
+  filter(parameter == "base") |>
+  ggplot(aes(model, Estimate, ymin = L, ymax = U, color = species)) +
+  geom_point(position = position_dodge(width = 0.3)) +
+  geom_errorbar(width = 0, position = position_dodge(width = 0.3)) +
+  facet_wrap(~transition) +
+  ggtitle("Base transition rates") +
+  scale_color_manual(values = viridis_pal()(4)[c(1, 3)]) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) -> a
+
+all_mod_params |>
+  filter(parameter != "base") |>
+  ggplot(aes(Estimate, model, xmin = L, xmax = U, color = transition)) +
+  geom_point(position = position_dodge(width = 0.3)) +
+  geom_errorbar(width = 0, position = position_dodge(width = 0.3)) +
+  facet_wrap(species ~ ., ncol = 1) +
+  coord_cartesian(xlim = c(0, 10)) +
+  theme_bw() +
+  geom_vline(aes(xintercept = 1), linetype = "dashed") +
+  ggtitle("Hazard ratios of antifungal exposure") -> b
+
+(a / b) + plot_layout(heights = c(0.6, 1))
+```
+
+```{r}
+#| fig.width: 5
+#| fig.height: 5
+#| fig.cap: "Mean predicted time in state (days) across the different models. State 1 = uncolonised, state 2 = colonised."
+
+pmap(
+  list(
+    orgs = list(
+      "albicans", "albicans", "albicans",
+      "glabrata", "glabrata", "glabrata"
+    ),
+    model = list(
+      "azole", "echinocandin", "amphoteracin",
+      "azole", "echinocandin", "amphoteracin"
+    ),
+    msm_object = list(
+      alb_msm_azole, alb_msm_echinocandin, alb_msm_ampho,
+      glab_msm_azole, glab_msm_echinocandin, glab_msm_ampho
+    )
+  ),
+  \(orgs, model, msm_object) sojourn.msm(msm_object,
+    covariates = 0
+  ) |>
+    as.data.frame() |>
+    rownames_to_column(var = "state") |>
+    mutate(
+      organism = orgs,
+      model = model
+    )
+) |>
+  bind_rows() |>
+  ggplot(aes(model, estimates, ymin = L, ymax = U, color = organism)) +
+  geom_point() +
+  geom_errorbar(width = 0) +
+  facet_wrap(organism ~ state, scales = "free") +
+  theme_bw() +
+  scale_color_manual(values = viridis_pal()(4)[c(1, 3)]) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+
+```{r}
+#| fig.height: 6
+#| fig.width: 6
+#| fig.cap: "Simulated C. albicans (top) and glabrata (bottom) prevalence with antifungal exposure. Period of antifungal exposure is shown by dark grey rectangle."
+
+
+# simulate prevalence at different covariate values
+
+
+# helper function to pull the bits we need out of the msm model object ----
+
+pull_state_probs_out_of_msm_model <- function(mod,
+                                              t1 = 0,
+                                              t2 = 5,
+                                              times = c(5, 10),
+                                              covariates = list(
+                                                list(0), list(1),
+                                                list(0)
+                                              ),
+                                              ci = "normal") {
+  pmatrix.piecewise.msm(mod,
+    t1 = t1,
+    t2 = t2,
+    times = times,
+    covariates = covariates,
+    ci = ci
+  ) -> pmatrixout
+  bind_cols(
+    t = t2,
+    as.data.frame(unclass(pmatrixout$estimates)) |>
+      janitor::clean_names() |>
+      rename_with(\(x) paste0(gsub("_", "", x), "_estimate")),
+    as.data.frame(unclass(pmatrixout$L)) |>
+      rename(
+        state1_lci = V1,
+        state2_lci = V2
+      ),
+    as.data.frame(unclass(pmatrixout$U)) |>
+      rename(
+        state1_uci = V1,
+        state2_uci = V2
+      )
+  ) |>
+    rownames_to_column(var = "starting_state") -> dfout
+  return(dfout)
+}
+
+# ----------------------------------------------------------------------------
+map(
+  1:50,
+  \(x) pull_state_probs_out_of_msm_model(
+    mod = alb_msm_echinocandin,
+    times = c(5, 15),
+    t2 = x
+  )
+) -> sims
+
+# these are the markov chain equilibrium values
+starting_prev_alb_azole <- 0.372865
+starting_prev_alb_echino <- 0.36616
+
+starting_prev <- starting_prev_alb_echino
+
+sims |>
+  bind_rows() |>
+  mutate(starting_state = tolower(gsub(" ", "", starting_state))) |>
+  select(!contains("state1")) |>
+  mutate(
+    prev_estimate = if_else(starting_state == "state2", state2_estimate *
+      starting_prev, state2_estimate * (1 -
+      starting_prev)),
+    prev_lci = if_else(starting_state == "state2", state2_lci *
+      starting_prev, state2_lci * (1 -
+      starting_prev)),
+    prev_uci = if_else(starting_state == "state2", state2_uci *
+      starting_prev, state2_uci * (1 -
+      starting_prev))
+  ) |>
+  group_by(t) |>
+  summarise(
+    tot_prev_estimate = sum(prev_estimate),
+    tot_prev_lci = sum(prev_lci),
+    tot_prev_uci = sum(prev_uci)
+  ) |>
+  ggplot(aes(t, tot_prev_estimate,
+    ymin = tot_prev_lci, ymax =
+      tot_prev_uci
+  )) +
+  geom_line() +
+  geom_ribbon(alpha = 0.3, color = NA) +
+  annotate("rect", xmin = 5, xmax = 15, ymin = 0.3, ymax = 0.32) +
+  labs(title = "C. albicans", subtitle = "10 days echinocandin") ->
+p_alb_echino
+
+map(
+  1:50,
+  \(x) pull_state_probs_out_of_msm_model(
+    mod = alb_msm_azole,
+    times = c(5, 15),
+    t2 = x
+  )
+) -> sims_alb_azole
+
+starting_prev <- starting_prev_alb_azole
+
+sims_alb_azole |>
+  bind_rows() |>
+  mutate(starting_state = tolower(gsub(" ", "", starting_state))) |>
+  select(!contains("state1")) |>
+  mutate(
+    prev_estimate = if_else(starting_state == "state2", state2_estimate *
+      starting_prev, state2_estimate * (1 -
+      starting_prev)),
+    prev_lci = if_else(starting_state == "state2", state2_lci *
+      starting_prev, state2_lci * (1 -
+      starting_prev)),
+    prev_uci = if_else(starting_state == "state2", state2_uci *
+      starting_prev, state2_uci * (1 -
+      starting_prev))
+  ) |>
+  group_by(t) |>
+  summarise(
+    tot_prev_estimate = sum(prev_estimate),
+    tot_prev_lci = sum(prev_lci),
+    tot_prev_uci = sum(prev_uci)
+  ) |>
+  ggplot(aes(t, tot_prev_estimate,
+    ymin = tot_prev_lci, ymax =
+      tot_prev_uci
+  )) +
+  geom_line() +
+  geom_ribbon(alpha = 0.3, color = NA) +
+  annotate("rect", xmin = 5, xmax = 15, ymin = 0.3, ymax = 0.32) +
+  labs(title = "C. albicans", subtitle = "10 days azole") ->
+p_alb_azole
+
+
+map(
+  1:50,
+  \(x) pull_state_probs_out_of_msm_model(
+    mod = glab_msm_echinocandin,
+    times = c(5, 15),
+    t2 = x
+  )
+) -> sims_glab_echino
+
+starting_prev <- 0.09089575
+
+sims_glab_echino |>
+  bind_rows() |>
+  mutate(starting_state = tolower(gsub(" ", "", starting_state))) |>
+  select(!contains("state1")) |>
+  mutate(
+    prev_estimate = if_else(starting_state == "state2", state2_estimate *
+      starting_prev, state2_estimate * (1 -
+      starting_prev)),
+    prev_lci = if_else(starting_state == "state2", state2_lci *
+      starting_prev, state2_lci * (1 -
+      starting_prev)),
+    prev_uci = if_else(starting_state == "state2", state2_uci *
+      starting_prev, state2_uci * (1 -
+      starting_prev))
+  ) |>
+  group_by(t) |>
+  summarise(
+    tot_prev_estimate = sum(prev_estimate),
+    tot_prev_lci = sum(prev_lci),
+    tot_prev_uci = sum(prev_uci)
+  ) |>
+  ggplot(aes(t, tot_prev_estimate,
+    ymin = tot_prev_lci, ymax =
+      tot_prev_uci
+  )) +
+  geom_line() +
+  geom_ribbon(alpha = 0.3, color = NA) +
+  annotate("rect", xmin = 5, xmax = 15, ymin = 0.05, ymax = 0.06) +
+  labs(title = "C. glabrata", subtitle = "10 days echinocandin") ->
+p_glab_echino
+
+p_alb_azole + p_alb_echino + p_glab_echino + plot_spacer()
+
+```
+
+Results are shown in the figures below.
+
+The conclusions I think we can draw from these simple models are as follows:
+
+* There are not a great number of state transitions in the dataset; that is,
+  if someone is colonised, they tend to remain colonised, and if they are
+  non-colonised, they tend to remain non-colonised. The models quantify this:
+  the mean time in state (at least ~30 days) is > median follow up (10 days).
+* This means that estimating the effect of antifungals on presence/absence is
+  tricky, and has wide uncertainty intervals
+* That said, the parameters from the fitted models do come up with some
+  reasonably interesting values: mostly, there is no convincing effect of
+  antifungal exposure on glabrata or albicans colonisation. The exception to
+  this is that echinocandins seem to act to increase albicans prevalence
+* Some care should be taken in interpreting this causally - there is every
+  chance that this could be confounding i.e. some other variable is associated
+  with both echinocandin exposure and C. albicans (e.g. broad spectrum
+  antibacterial exposure) 
+
+# Directions for further work
+
+I hope that these models can serve as a starting point to decide how to
+progress this analysis. Key questions I think are:
+
+* I've looked at antifungal exposure and colonisation; is this the research
+  question that is most interesting? Are there other questions that may be
+  better to address?
+* I have used a binary presence-absence end point and looked at species
+  separately. This assumes that presence of different species are independent
+  from each other- this may not be a reasonable assumption. The way in which
+  presence or absence of one species influences another is probably complex.
+* Given the rarity of some species, is there a reasonable way to aggregate
+  species to produce some sensible outcome variables?
+* Are there other covariates that may influence the presence/absence of
+  Candida spp. - almost certainly yes? Should they be included in the model?
+* How can the MIC data be incorporated? This is a key question I think. Given
+  that colonisation is reasonably stable over the time period of the study,
+  seeing how the population of Candida change (both in terms of species
+  presence/absence and MIC distribution) following drug exposure could be
+  super interesting.
+* I've fit these models in *msm* in R in a frequentist framework. I think this
+  is fine to start with but going to a Bayesian analysis and using the Stan
+  programming language will allow a lot more flexibility - but is more
+  involved. If we decide to go down that route then I think it would be good
+  to sketch out what we think the models would look like.
